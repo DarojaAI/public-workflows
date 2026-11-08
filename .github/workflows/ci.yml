@@ -1,0 +1,81 @@
+# CI for this repo itself: lint every workflow, scan the whole history for
+# secrets (everything here is public), and test the guardrail script.
+# Tools are pinned by version AND sha256 (from each release's checksums
+# file); actions are pinned by commit SHA.
+name: ci
+
+"on":
+  pull_request:
+  push:
+    branches: [main]
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  actionlint:
+    name: actionlint
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      ACTIONLINT_VERSION: "1.7.9"
+      ACTIONLINT_SHA256: 233b280d05e100837f4af1433c7b40a5dcb306e3aa68fb4f17f8a7f45a7df7b4
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803  # v6.1.0
+        with:
+          persist-credentials: false
+      - name: Install actionlint (pinned, checksum verified)
+        run: |
+          set -euo pipefail
+          tarball="actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz"
+          curl -sSfL -o "${RUNNER_TEMP}/${tarball}" \
+            "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/${tarball}"
+          echo "${ACTIONLINT_SHA256}  ${RUNNER_TEMP}/${tarball}" | sha256sum -c -
+          tar -xzf "${RUNNER_TEMP}/${tarball}" -C "${RUNNER_TEMP}" actionlint
+      - name: actionlint (shellcheck runs on every run block)
+        run: |
+          set -euo pipefail
+          shellcheck --version | head -2
+          "${RUNNER_TEMP}/actionlint" -color
+
+  gitleaks:
+    name: gitleaks
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      GITLEAKS_VERSION: "8.30.1"
+      GITLEAKS_SHA256: 551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803  # v6.1.0
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      # The gitleaks CLI, not gitleaks-action: the action needs a license key
+      # for organization repos; the CLI does not.
+      - name: Install gitleaks (pinned, checksum verified)
+        run: |
+          set -euo pipefail
+          tarball="gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          curl -sSfL -o "${RUNNER_TEMP}/${tarball}" \
+            "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/${tarball}"
+          echo "${GITLEAKS_SHA256}  ${RUNNER_TEMP}/${tarball}" | sha256sum -c -
+          tar -xzf "${RUNNER_TEMP}/${tarball}" -C "${RUNNER_TEMP}" gitleaks
+      - name: gitleaks (full history)
+        run: '"${RUNNER_TEMP}/gitleaks" git --redact --verbose --exit-code 1 .'
+
+  tests:
+    name: guardrail tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803  # v6.1.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1  # v6.3.0
+        with:
+          python-version: "3.12"
+      - name: Install test dependency
+        run: python -m pip install --disable-pip-version-check pyyaml==6.0.2
+      - name: Run tests
+        run: python -m unittest discover -s tests -v
