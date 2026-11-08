@@ -1,0 +1,159 @@
+# agent-guardrails.yml — required check for repos with agent-coding=true
+# (DarojaAI/linux-desktop-seed#3362). TEMPLATE: the source of truth lives in
+# DarojaAI/linux-desktop-seed config/agent-coding/agent-guardrails.yml. Each
+# org's workflow home (config/agent-coding.json guardrails.workflow_homes;
+# default ORG/.github) carries it rendered, and the org ruleset "agent-coding:
+# default branch" references it there as a required workflow. A home pinned
+# to a release tag (DarojaAI/public-workflows) is released by a human; the
+# setup (scripts/maintenance/agent-coding-org-setup.sh) checks the tag holds
+# exactly this rendering. APPROVERS is rendered from guardrails.approvers
+# (the placeholder below is never committed as is).
+#
+# Port of DarojaAI/whippingboy claude-guardrails (infra-actions
+# tool/check/claude-guardrails): G1 gate files, G2 no deleted tests or new
+# skips. Self-contained on purpose: it runs in every org listed in the
+# config, and a private reusable workflow in another org is not callable.
+#
+# Applies to agent PRs only: head branch agent/** or author
+# darojaai-agents[bot]. Other PRs pass. An approver overrides with the
+# `gate-approved` label applied AFTER the PR's latest commit. Ruleset-required
+# workflows only run on the default pull_request activity types, which don't
+# include `labeled`, so a check that finds gate files WAITS up to WAIT_MINUTES
+# for the label instead of failing at once: it passes within about 30s of an
+# approver labelling. After the wait it fails; label, then re-run the check.
+name: agent-guardrails
+
+"on":
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review, labeled, unlabeled]
+
+permissions:
+  contents: read
+  pull-requests: read
+  issues: read
+
+jobs:
+  agent-guardrails:
+    name: agent-guardrails
+    runs-on: ubuntu-latest
+    timeout-minutes: 70
+    steps:
+      - name: Checkout (full history for the base...head diff)
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803  # v6.1.0
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: G1 gate files + G2 test tampering
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          HEAD_REF: ${{ github.event.pull_request.head.ref }}
+          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          APPROVERS: "patelmm79"
+        run: |
+          set -euo pipefail
+          if [[ "${HEAD_REF}" != agent/* && "${PR_AUTHOR}" != "darojaai-agents[bot]" ]]; then
+            echo "agent-guardrails: not an agent PR (head ${HEAD_REF}, author ${PR_AUTHOR}); pass"
+            exit 0
+          fi
+          git fetch --no-tags --quiet origin "${BASE_SHA}" "${HEAD_SHA}" 2>/dev/null || true
+          events="$(mktemp)"
+          gh api --paginate "repos/${REPO}/issues/${PR_NUMBER}/events" --jq '.[]' | jq -s . > "${events}"
+          head_date="$(git log -1 --format=%cI "${HEAD_SHA}")"
+          python3 - "${events}" "${head_date}" <<'PY'
+          import datetime as dt, fnmatch, json, os, re, subprocess, sys, time
+
+          GATE = [".github/**", "CODEOWNERS", ".pre-commit-config.yaml", ".coveragerc",
+                  "codecov.yml", ".codecov.yml", "**claude-run*", "**agent-guardrails*",
+                  "tests/canaries/**"]
+          TESTS = ["tests/**", "test/**", "**/tests/**", "**/test/**", "**/__tests__/**",
+                   "**test_*.py", "**_test.py", "**.test.ts", "**.test.tsx", "**.test.js",
+                   "**.test.jsx", "**.spec.ts", "**.spec.tsx", "**.spec.js", "**.spec.jsx",
+                   "**.bats", "**_test.go"]
+          JS = ["**.js", "**.jsx", "**.ts", "**.tsx"]
+          SKIPS = [
+              (r"@pytest\.mark\.(skip|skipif|xfail)\b", "pytest skip/xfail marker", ["**.py"]),
+              (r"\bpytest\.(skip|xfail)\(", "pytest.skip()/xfail() call", ["**.py"]),
+              (r"@unittest\.(skip|skipIf|skipUnless|expectedFailure)\b", "unittest skip", ["**.py"]),
+              (r"\b(it|test|describe|context)\.(skip|todo)\(", "JS .skip/.todo", JS),
+              (r"\b(xit|xtest|xdescribe)\(", "JS x-prefixed test", JS),
+              (r"^\s*skip(\s|$)", "bats skip", ["**.bats"]),
+              (r"\bt\.Skip(f|Now)?\(", "Go t.Skip", ["**.go"]),
+              (r"\|\|\s*true\b", "`|| true`", None),
+          ]
+
+          def match(p, globs):
+              return any(fnmatch.fnmatchcase(p, g.replace("**", "*")) for g in globs)
+
+          def git(*a):
+              return subprocess.run(["git", *a], check=True, capture_output=True, text=True).stdout
+
+          base, head = os.environ["BASE_SHA"], os.environ["HEAD_SHA"]
+          rows = [l.split("\t") for l in git("diff", "--name-status", "--no-renames",
+                                              f"{base}...{head}").splitlines()]
+          changed = [(r[0][0], r[-1]) for r in rows if len(r) >= 2]
+
+          approvers = {x.strip() for x in os.environ["APPROVERS"].split(",") if x.strip()}
+          ts = lambda s: dt.datetime.fromisoformat(s.replace("Z", "+00:00"))
+          head_ts = ts(sys.argv[2])
+          WAIT_MINUTES = 60
+          POLL_SECONDS = 30
+
+          def is_approved(events):
+              labeled = [e for e in events
+                         if e.get("event") == "labeled"
+                         and (e.get("label") or {}).get("name") == "gate-approved"]
+              last = max(labeled, key=lambda e: ts(e["created_at"])) if labeled else None
+              return bool(last and (last.get("actor") or {}).get("login") in approvers
+                          and ts(last["created_at"]) > head_ts)
+
+          def fetch_events():
+              out = subprocess.run(
+                  ["gh", "api", "--paginate",
+                   f"repos/{os.environ['REPO']}/issues/{os.environ['PR_NUMBER']}/events",
+                   "--jq", ".[]"],
+                  check=True, capture_output=True, text=True).stdout
+              return json.loads("[" + ",".join(l for l in out.splitlines() if l.strip()) + "]")
+
+          approved = is_approved(json.load(open(sys.argv[1])))
+
+          findings = [f"G1: gate file touched: {p}" for _s, p in changed if match(p, GATE)]
+          for status, path in changed:
+              if not match(path, TESTS):
+                  continue
+              if status == "D":
+                  findings.append(f"G2: deleted test file: {path}")
+                  continue
+              diff = git("diff", "--unified=0", "--no-renames", f"{base}...{head}", "--", path)
+              for line in (l[1:] for l in diff.splitlines()
+                           if l.startswith("+") and not l.startswith("+++")):
+                  for pat, label, globs in SKIPS:
+                      if (globs is None or match(path, globs)) and re.search(pat, line):
+                          findings.append(f"G2: {path}: added {label}: {line.strip()[:120]}")
+                          break
+          for f in findings:
+              print(f)
+          if not findings:
+              print("agent-guardrails: PASS (no gate files, no deleted tests, no new skips)")
+          elif approved:
+              print("agent-guardrails: PASS (gate-approved by an approver after the latest commit)")
+          else:
+              print(f"agent-guardrails: waiting up to {WAIT_MINUTES} min for `gate-approved` from an "
+                    "approver, applied after the latest commit.", flush=True)
+              deadline = time.time() + WAIT_MINUTES * 60
+              while time.time() < deadline:
+                  time.sleep(POLL_SECONDS)
+                  try:
+                      if is_approved(fetch_events()):
+                          print("agent-guardrails: PASS (gate-approved by an approver after the latest commit)")
+                          sys.exit(0)
+                  except subprocess.CalledProcessError as e:
+                      print(f"agent-guardrails: couldn't read PR events, will retry: {(e.stderr or '').strip()[:200]}",
+                            flush=True)
+              print(f"agent-guardrails: FAIL. No `gate-approved` from an approver within {WAIT_MINUTES} min. "
+                    "Add the label, then re-run this check.")
+              sys.exit(1)
+          PY
