@@ -135,8 +135,9 @@ class GuardrailScriptTest(unittest.TestCase):
         self._tmp.cleanup()
 
     def run_check(self, *, head_ref="agent/fix-1", author="someone", events=(), later_events=None,
-                  wait_minutes="0", poll_seconds="0") -> subprocess.CompletedProcess:
-        head = self.fx.commit("head", HEAD_DATE)
+                  wait_minutes="0", poll_seconds="0", fx=None) -> subprocess.CompletedProcess:
+        fx = fx or self.fx
+        head = fx.commit("head", HEAD_DATE)
         (self.gh_dir / "events.json").write_text(json.dumps(list(events)))
         if later_events is not None:
             (self.gh_dir / "events_later.json").write_text(json.dumps(list(later_events)))
@@ -144,7 +145,7 @@ class GuardrailScriptTest(unittest.TestCase):
         run = run.replace("WAIT_MINUTES = 60", f"WAIT_MINUTES = {wait_minutes}", 1)
         run = run.replace("POLL_SECONDS = 30", f"POLL_SECONDS = {poll_seconds}", 1)
         env = {
-            **self.fx.env,
+            **fx.env,
             "PATH": self.path,
             "FAKE_GH_DIR": str(self.gh_dir),
             "GH_TOKEN": "unused",
@@ -152,12 +153,17 @@ class GuardrailScriptTest(unittest.TestCase):
             "PR_NUMBER": "1",
             "HEAD_REF": head_ref,
             "PR_AUTHOR": author,
-            "BASE_SHA": self.fx.base,
+            "BASE_SHA": fx.base,
             "HEAD_SHA": head,
             "APPROVERS": self.step["env"]["APPROVERS"],
         }
-        return subprocess.run(["bash", "-c", run], cwd=self.fx.repo, env=env,
+        return subprocess.run(["bash", "-c", run], cwd=fx.repo, env=env,
                               capture_output=True, text=True, timeout=120)
+
+    def _subdir(self, path: str) -> Path:
+        d = self.tmp / ("fx_" + path.replace("/", "_"))
+        d.mkdir()
+        return d
 
     def assertPass(self, r, needle="agent-guardrails: PASS"):
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
@@ -180,9 +186,9 @@ class GuardrailScriptTest(unittest.TestCase):
         self.assertPass(self.run_check(), "PASS (no gate files")
 
     def test_agent_app_author_on_any_branch_is_checked(self):
-        self.fx.write(".github/workflows/ci.yml", "on: push\n")
+        self.fx.write(".github/CODEOWNERS", "* @x\n")
         r = self.run_check(head_ref="feature/x", author="darojaai-agents[bot]")
-        self.assertFail(r, "G1: gate file touched: .github/workflows/ci.yml")
+        self.assertFail(r, "G1: gate file touched: .github/CODEOWNERS")
 
     def test_gate_file_without_label_fails_after_the_wait(self):
         self.fx.write("CODEOWNERS", "* @someone\n")
@@ -191,14 +197,38 @@ class GuardrailScriptTest(unittest.TestCase):
         self.assertIn("waiting up to 0 min", r.stdout)
 
     def test_gate_file_approved_after_latest_commit_passes(self):
-        self.fx.write(".pre-commit-config.yaml", "repos: []\n")
+        self.fx.write(".github/workflows/enable-automerge.yml", "on: push\n")
         r = self.run_check(events=[label("gate-approved", APPROVER, AFTER)])
         self.assertPass(r, "PASS (gate-approved by an approver after the latest commit)")
 
     def test_gate_file_approved_before_latest_commit_fails(self):
-        self.fx.write(".github/dependabot.yml", "version: 2\n")
+        self.fx.write(".github/workflows/agent-guardrails.yml", "on: push\n")
         r = self.run_check(events=[label("gate-approved", APPROVER, BEFORE)])
-        self.assertFail(r, "G1: gate file touched: .github/dependabot.yml")
+        self.assertFail(r, "G1: gate file touched: .github/workflows/agent-guardrails.yml")
+
+    # G1 is tier 1 only
+    def test_tier1_files_are_gated(self):
+        for path in ["CODEOWNERS", ".github/CODEOWNERS", "docs/CODEOWNERS",
+                     ".github/workflows/agent-guardrails.yml", "config/agent-coding/agent-guardrails.yml",
+                     ".github/workflows/claude-run.yml", ".github/workflows/enable-automerge.yml",
+                     ".github/workflows/reusable-auto-merge.yml", "config/agent-coding.json",
+                     ".github/workflows/agent-coding-setup.yml",
+                     "scripts/maintenance/agent-coding-org-setup.sh",
+                     ".github/rulesets/main.json", "tests/canaries/c.py"]:
+            with self.subTest(path=path):
+                fx = Fixture(self._subdir(path))
+                fx.write(path, "x\n")
+                r = self.run_check(fx=fx)
+                self.assertFail(r, f"G1: gate file touched: {path}")
+
+    def test_ordinary_workflow_and_config_changes_are_not_gated(self):
+        for path in [".github/workflows/ci.yml", ".github/dependabot.yml",
+                     ".pre-commit-config.yaml", ".coveragerc", "codecov.yml",
+                     ".github/workflows/pre-merge-check.yml", ".semgrep/baseline.json"]:
+            with self.subTest(path=path):
+                fx = Fixture(self._subdir(path))
+                fx.write(path, "x\n")
+                self.assertPass(self.run_check(fx=fx), "PASS (no gate files")
 
     def test_label_from_a_non_approver_does_not_count(self):
         self.fx.write("CODEOWNERS", "* @x\n")
