@@ -15,7 +15,9 @@
 # config, and a private reusable workflow in another org is not callable.
 #
 # Applies to agent PRs only: head branch agent/** or author
-# darojaai-agents[bot]. Other PRs pass. An approver overrides with the
+# darojaai-agents[bot]. Other PRs pass. G1 is tier 1 only: CODEOWNERS, the
+# guardrails, claude-run, merge lanes (auto-merge, ready-merge), agent-coding
+# setup and token minting, rulesets and branch protection. An approver overrides with the
 # `gate-approved` label applied AFTER the PR's latest commit. Ruleset-required
 # workflows only run on the default pull_request activity types, which don't
 # include `labeled`, so a check that finds gate files WAITS up to WAIT_MINUTES
@@ -66,9 +68,15 @@ jobs:
           python3 - "${events}" "${head_date}" <<'PY'
           import datetime as dt, fnmatch, json, os, re, subprocess, sys, time
 
-          GATE = [".github/**", "CODEOWNERS", ".pre-commit-config.yaml", ".coveragerc",
-                  "codecov.yml", ".codecov.yml", "**claude-run*", "**agent-guardrails*",
-                  "tests/canaries/**"]
+          # Tier 1 only: files that control the guardrails themselves (who may
+          # merge, what is required, agent access). An agent editing one could
+          # switch off its own checks, so a human approves. Ordinary workflows,
+          # pre-commit and coverage config are not here: they are to be judged
+          # by an independent automated review (tier 2), not a human label.
+          GATE = ["CODEOWNERS", "**/CODEOWNERS", "**agent-guardrails*", "**claude-guardrails*",
+                  "**claude-run*", "**automerge*", "**auto-merge*", "**ready-merge*",
+                  "**agent-coding*", "**agent-gh*", "**ruleset*", "**branch-protection*",
+                  "**branch_protection*", "tests/canaries/**"]
           TESTS = ["tests/**", "test/**", "**/tests/**", "**/test/**", "**/__tests__/**",
                    "**test_*.py", "**_test.py", "**.test.ts", "**.test.tsx", "**.test.js",
                    "**.test.jsx", "**.spec.ts", "**.spec.tsx", "**.spec.js", "**.spec.jsx",
