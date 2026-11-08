@@ -214,7 +214,14 @@ class GuardrailScriptTest(unittest.TestCase):
                      ".github/workflows/reusable-auto-merge.yml", "config/agent-coding.json",
                      ".github/workflows/agent-coding-setup.yml",
                      "scripts/maintenance/agent-coding-org-setup.sh",
-                     ".github/rulesets/main.json", "tests/canaries/c.py"]:
+                     ".github/rulesets/main.json", "tests/canaries/c.py",
+                     ".github/workflows/ready-merge.yml",
+                     ".github/workflows/install-agent-gh-minter.yml",
+                     "etc/systemd/system/agent-gh-mint.timer",
+                     ".github/workflows/reusable-claude-guardrails.yml",
+                     "tool/check/claude-guardrails/scripts/guardrails.py",
+                     ".github/workflows/apply-branch-protection.yml",
+                     "scripts/sync_branch_protection.py", "scripts/apply-rulesets.sh"]:
             with self.subTest(path=path):
                 fx = Fixture(self._subdir(path))
                 fx.write(path, "x\n")
