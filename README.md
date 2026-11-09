@@ -43,26 +43,25 @@ default branch" requires it on the default branch of every repo whose
 `agent-coding` custom property is true. It applies only to agent PRs (head
 branch `agent/**`, or author `darojaai-agents[bot]`). Other PRs pass at once.
 
-- **G1, gate files (tier 1):** the PR touches a file that controls the
-  guardrails themselves: `CODEOWNERS`, `**agent-guardrails*`,
-  `**claude-guardrails*`, `**claude-run*`, merge lanes (`**automerge*`,
-  `**auto-merge*`, `**ready-merge*`), agent-coding setup and token minting
-  (`**agent-coding*`, `**agent-gh*`), rulesets and branch protection
-  (`**ruleset*`, `**branch-protection*`, `**branch_protection*`), the Semgrep
-  gate and its baseline (`.semgrep/**`, `**.semgrepignore`, `**semgrep_gate*`),
-  or `tests/canaries/**`. Ordinary workflows, pre-commit and coverage config are
-  not gated here.
+- **Gate files** are approved natively: since v2.0.0 the org ruleset requires an
+  approving review from the `guardrail-approvers` team on the guarded paths
+  (GitHub's required-reviewer rule, configured in DarojaAI/linux-desktop-seed
+  `config/agent-coding.json`), so approving the PR is the whole approval. **G1**
+  here is only a backstop: it reads the branch's live rules and fails a gate
+  file that no required-reviewer pattern covers (gitignore matching via
+  `git check-ignore`).
 - **G2, test tampering:** the PR deletes a test file, or adds a skip to one
   (pytest or unittest skip/xfail, JS `.skip`/`.todo`/`x`-tests, bats `skip`,
   Go `t.Skip`, or `|| true`).
 
-An approver named in the file's `APPROVERS` overrides a finding by adding the
-`gate-approved` label **after** the PR's latest commit. Required workflows
-only run on the default `pull_request` activity types, which don't include
-`labeled`, so the check never waits (waiting burns Actions minutes). When it
-finds something it fails within seconds, writes the reason to the job summary,
-and keeps one PR comment up to date: "waiting for approval", with the files and
-a link to the run. Add the label, then re-run the failed check from that link.
+An approver named in the file's `APPROVERS` clears a finding by approving the
+PR on its latest commit (the older `gate-approved` label, applied after that
+commit, also still works). Required workflows only run on the default
+`pull_request` activity types, which don't include reviews or labels, so the
+check never waits (waiting burns Actions minutes). When it finds something it
+fails within seconds, writes the reason to the job summary, and keeps one PR
+comment up to date: "waiting for approval", with the files and a link to the
+run. Approve, then re-run the failed check from that link.
 The comment changes to "approved" or "passed" on later runs.
 
 The file is generated, not hand-edited. Its source is the agent-coding

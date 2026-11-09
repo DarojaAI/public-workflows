@@ -10,20 +10,25 @@
 # (the placeholder below is never committed as is).
 #
 # Port of DarojaAI/whippingboy claude-guardrails (infra-actions
-# tool/check/claude-guardrails): G1 gate files, G2 no deleted tests or new
-# skips. Self-contained on purpose: it runs in every org listed in the
-# config, and a private reusable workflow in another org is not callable.
+# tool/check/claude-guardrails), G2 only: no deleted tests or new skips.
+# Self-contained on purpose: it runs in every org listed in the config, and a
+# private reusable workflow in another org is not callable.
+#
+# Gate files (G1) are approved natively: the org ruleset "agent-coding:
+# default branch" requires an approving review from guardrails.reviewer_team on
+# guardrails.reviewed_path_groups (GitHub's required-reviewer rule), so
+# approving the PR is the whole approval and an armed PR merges at once. G1 here
+# is only a backstop: for each gate file it reads the branch's live rules and
+# defers to GitHub when a required-reviewer pattern covers it (gitignore
+# matching, via git check-ignore). A gate file no live pattern covers fails G1
+# as before, so a ruleset that didn't apply never leaves gate files open.
 #
 # Applies to agent PRs only: head branch agent/** or author
-# darojaai-agents[bot]. Other PRs pass. G1 is tier 1 only: CODEOWNERS, the
-# guardrails, claude-run, merge lanes (auto-merge, ready-merge), agent-coding
-# setup and token minting, rulesets and branch protection, and the Semgrep gate
-# and its baseline (an agent could otherwise accept its own findings). An approver overrides with the
-# `gate-approved` label applied AFTER the PR's latest commit. The check never
-# waits (waiting burned Actions minutes): it fails at once, writes the reason to
-# the job summary and keeps one PR comment up to date ("waiting for approval",
-# with the files and a link to re-run). Ruleset-required workflows don't run on
-# `labeled`, so after labelling, re-run the failed check (the comment links it).
+# darojaai-agents[bot]. Other PRs pass. A G2 finding is approved by an
+# approving review from an approver on the latest commit (or, as before, the
+# `gate-approved` label applied after it). Ruleset-required workflows don't run
+# on review or label events, so after approving, re-run the failed check (the
+# PR comment links it). The check never waits.
 name: agent-guardrails
 
 "on":
@@ -46,12 +51,13 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
-      - name: G1 gate files + G2 test tampering
+      - name: G1 gate-file backstop + G2 test tampering
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
           HEAD_REF: ${{ github.event.pull_request.head.ref }}
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
           PR_AUTHOR: ${{ github.event.pull_request.user.login }}
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
@@ -66,20 +72,19 @@ jobs:
           git fetch --no-tags --quiet origin "${BASE_SHA}" "${HEAD_SHA}" 2>/dev/null || true
           events="$(mktemp)"
           gh api --paginate "repos/${REPO}/issues/${PR_NUMBER}/events" --jq '.[]' | jq -s . > "${events}"
+          reviews="$(mktemp)"
+          gh api --paginate "repos/${REPO}/pulls/${PR_NUMBER}/reviews" --jq '.[]' | jq -s . > "${reviews}"
           head_date="$(git log -1 --format=%cI "${HEAD_SHA}")"
-          python3 - "${events}" "${head_date}" <<'PY'
+          python3 - "${events}" "${head_date}" "${reviews}" <<'PY'
           import datetime as dt, fnmatch, json, os, re, subprocess, sys, time
 
-          # Tier 1 only: files that control the guardrails themselves (who may
-          # merge, what is required, agent access). An agent editing one could
-          # switch off its own checks, so a human approves. Ordinary workflows,
-          # pre-commit and coverage config are not here: they are to be judged
-          # by an independent automated review (tier 2), not a human label.
+          # Files that control the guardrails themselves. Normally gated natively by
+          # the ruleset's required reviewers; checked here only as a backstop.
           GATE = ["CODEOWNERS", "**/CODEOWNERS", "**agent-guardrails*", "**claude-guardrails*",
                   "**claude-run*", "**automerge*", "**auto-merge*", "**ready-merge*",
-                  "**agent-coding*", "**agent-gh*", "**ruleset*", "**branch-protection*",
-                  "**branch_protection*", ".semgrep/**", "**.semgrepignore", "**semgrep_gate*",
-                  "tests/canaries/**"]
+                  "**agent-coding*", "**agent-gh*", "**open-agent-pr*", "**ruleset*",
+                  "**branch-protection*", "**branch_protection*", ".semgrep/**",
+                  "**.semgrepignore", "**semgrep_gate*", "tests/canaries/**"]
           TESTS = ["tests/**", "test/**", "**/tests/**", "**/test/**", "**/__tests__/**",
                    "**test_*.py", "**_test.py", "**.test.ts", "**.test.tsx", "**.test.js",
                    "**.test.jsx", "**.spec.ts", "**.spec.tsx", "**.spec.js", "**.spec.jsx",
@@ -100,7 +105,9 @@ jobs:
               return any(fnmatch.fnmatchcase(p, g.replace("**", "*")) for g in globs)
 
           def git(*a):
-              return subprocess.run(["git", *a], check=True, capture_output=True, text=True).stdout
+              # quotepath off: non-ASCII paths stay plain, so the globs match them.
+              return subprocess.run(["git", "-c", "core.quotepath=off", *a], check=True,
+                                    capture_output=True, text=True).stdout
 
           base, head = os.environ["BASE_SHA"], os.environ["HEAD_SHA"]
           rows = [l.split("\t") for l in git("diff", "--name-status", "--no-renames",
@@ -112,7 +119,17 @@ jobs:
           head_ts = ts(sys.argv[2])
           MARKER = "<!-- agent-guardrails -->"
 
-          def is_approved(events):
+          def is_approved(events, reviews):
+              # An approver's latest review is APPROVED and was made on the head commit.
+              latest = {}
+              for r in reviews:
+                  who = (r.get("user") or {}).get("login")
+                  if who in approvers and r.get("state") in ("APPROVED", "CHANGES_REQUESTED", "DISMISSED"):
+                      if who not in latest or r.get("submitted_at", "") >= latest[who].get("submitted_at", ""):
+                          latest[who] = r
+              if any(r["state"] == "APPROVED" and r.get("commit_id") == os.environ["HEAD_SHA"]
+                     for r in latest.values()):
+                  return True
               labeled = [e for e in events
                          if e.get("event") == "labeled"
                          and (e.get("label") or {}).get("name") == "gate-approved"]
@@ -149,9 +166,40 @@ jobs:
               except Exception as e:  # noqa: BLE001
                   print(f"agent-guardrails: couldn't write the job summary: {str(e)[:200]}")
 
-          approved = is_approved(json.load(open(sys.argv[1])))
+          def natively_reviewed(paths):
+              """Paths covered by a live required-reviewer pattern (team, >= 1 approval)."""
+              if not paths:
+                  return set()
+              try:
+                  rules = json.loads(gh(f"repos/{os.environ['REPO']}/rules/branches/{os.environ['BASE_REF']}"))
+              except Exception as e:  # noqa: BLE001
+                  print(f"agent-guardrails: couldn't read the branch rules: {str(e)[:200]}")
+                  return set()
+              pats = [fp for r in rules if r.get("type") == "pull_request"
+                      for rr in ((r.get("parameters") or {}).get("required_reviewers") or [])
+                      if (rr.get("minimum_approvals") or 0) >= 1
+                      and (rr.get("reviewer") or {}).get("type") == "Team"
+                      for fp in (rr.get("file_patterns") or []) if isinstance(fp, str)]
+              if not pats:
+                  return set()
+              import tempfile
+              with tempfile.TemporaryDirectory() as d:
+                  subprocess.run(["git", "init", "-q", d], check=True)
+                  with open(os.path.join(d, ".gitignore"), "w") as f:
+                      f.write("\n".join(pats) + "\n")
+                  out = subprocess.run(["git", "-C", d, "-c", "core.quotepath=off", "check-ignore",
+                                        "--no-index", "--stdin"],
+                                       input="\n".join(paths) + "\n", capture_output=True, text=True)
+              return {l for l in out.stdout.splitlines() if l} & set(paths)
 
-          findings = [f"G1: gate file touched: {p}" for _s, p in changed if match(p, GATE)]
+          approved = is_approved(json.load(open(sys.argv[1])), json.load(open(sys.argv[3])))
+
+          gated = [p for _s, p in changed if match(p, GATE)]
+          native = natively_reviewed(gated)
+          for p in sorted(native):
+              print(f"agent-guardrails: {p}: approval required natively (ruleset required reviewers)")
+          findings = [f"G1: gate file not covered by the ruleset's required reviewers: {p}"
+                      for p in gated if p not in native]
           shown = list(findings)  # what the PR comment shows: never the added line's text
           for status, path in changed:
               if not match(path, TESTS):
@@ -172,9 +220,9 @@ jobs:
               print(f)
           who = ", ".join(f"@{a}" for a in sorted(approvers))
           if not findings:
-              print("agent-guardrails: PASS (no gate files, no deleted tests, no new skips)")
-              upsert_comment("**agent-guardrails: passed.** No gate files, deleted tests or new skips "
-                             "at the latest commit.", create=False)
+              print("agent-guardrails: PASS (no uncovered gate files, no deleted tests, no new skips)")
+              upsert_comment("**agent-guardrails: passed.** No uncovered gate files, deleted tests or "
+                             "new skips at the latest commit.", create=False)
               sys.exit(0)
           # Paths are untrusted: show them in a code block whose fence is longer than any
           # backtick run in them, so they can't add mentions, links or images.
@@ -182,22 +230,22 @@ jobs:
           fence = "`" * max(3, 1 + max((len(r) for r in re.findall(r"`+", text)), default=0))
           listed = f"{fence}text\n{text}\n{fence}"
           if approved:
-              print("agent-guardrails: PASS (gate-approved by an approver after the latest commit)")
-              upsert_comment(f"**agent-guardrails: approved.** `gate-approved` was added after the "
-                             f"latest commit for:\n{listed}", create=True)
+              print("agent-guardrails: PASS (approved by an approver at the latest commit)")
+              upsert_comment(f"**agent-guardrails: approved** at the latest commit for:\n{listed}",
+                             create=True)
               summary(f"### agent-guardrails: approved\n{listed}")
               sys.exit(0)
           run_url = os.environ.get("RUN_URL", "")
           body = (f"**agent-guardrails: waiting for approval from {who}.**\n\n"
-                  f"This PR touches files that control the guardrails, or removes or skips tests:\n"
+                  f"This PR removes or skips tests, or touches gate files the ruleset doesn't cover:\n"
                   f"{listed}\n\n"
-                  f"To approve: add the `gate-approved` label, then [re-run this check]({run_url}) "
+                  f"To approve: approve the PR, then [re-run this check]({run_url}) "
                   f"(Re-run failed jobs). A new commit needs a new approval.")
           upsert_comment(body, create=True)
           summary("### agent-guardrails: waiting for approval\n" + body)
-          print(f"::error title=agent-guardrails::Waiting for `gate-approved` from {who}; "
-                "add the label, then re-run this check.")
-          print("agent-guardrails: FAIL. Needs `gate-approved` from an approver, applied after the "
-                "latest commit. Add the label, then re-run this check.")
+          print(f"::error title=agent-guardrails::Waiting for approval from {who}; "
+                "approve the PR, then re-run this check.")
+          print("agent-guardrails: FAIL. Needs an approving review from an approver on the latest "
+                "commit. Approve the PR, then re-run this check.")
           sys.exit(1)
           PY
