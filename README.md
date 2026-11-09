@@ -43,9 +43,14 @@ default branch" requires it on the default branch of every repo whose
 `agent-coding` custom property is true. It applies only to agent PRs (head
 branch `agent/**`, or author `darojaai-agents[bot]`). Other PRs pass at once.
 
-- **G1, gate files:** the PR touches `.github/**`, `CODEOWNERS`,
-  `.pre-commit-config.yaml`, coverage configs, `**claude-run*`,
-  `**agent-guardrails*` or `tests/canaries/**`.
+- **G1, gate files (tier 1):** the PR touches a file that controls the
+  guardrails themselves: `CODEOWNERS`, `**agent-guardrails*`,
+  `**claude-guardrails*`, `**claude-run*`, merge lanes (`**automerge*`,
+  `**auto-merge*`, `**ready-merge*`), agent-coding setup and token minting
+  (`**agent-coding*`, `**agent-gh*`), rulesets and branch protection
+  (`**ruleset*`, `**branch-protection*`, `**branch_protection*`), or
+  `tests/canaries/**`. Ordinary workflows, pre-commit and coverage config are
+  not gated here.
 - **G2, test tampering:** the PR deletes a test file, or adds a skip to one
   (pytest or unittest skip/xfail, JS `.skip`/`.todo`/`x`-tests, bats `skip`,
   Go `t.Skip`, or `|| true`).
