@@ -469,8 +469,8 @@ class GuardrailScriptTest(unittest.TestCase):
         self.assertFail(self.run_check(), "G1: gate file not covered")
 
     def test_a_pattern_only_fnmatch_matches_is_not_trusted(self):
-        # "config*" matches config/agent-coding.json as fnmatch (* crosses /) but as
-        # gitignore only the top-level name config*, which also matches. Use one that differs:
+        # "con*.json" matches config/agent-coding.json as fnmatch (* crosses /) but not as
+        # gitignore (a pattern with no slash matches one path component).
         (self.gh_dir / "rules.json").write_text(json.dumps(rules_with([["con*.json"]])))
         self.fx.write("config/agent-coding.json", "{}\n")
         self.assertFail(self.run_check(), "G1: gate file not covered")
@@ -513,4 +513,3 @@ class WorkflowStaticTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-
