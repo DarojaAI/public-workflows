@@ -122,14 +122,16 @@ jobs:
 
           def gh(*args, data=None):
               return subprocess.run(["gh", "api", *args], input=data, check=True,
-                                    capture_output=True, text=True).stdout
+                                    capture_output=True, text=True, timeout=30).stdout
 
           def upsert_comment(body, create):
-              # One comment per PR, found by MARKER. A failure here never changes the verdict.
+              # One comment per PR: the bot's own, found by MARKER. A failure here never
+              # changes the verdict.
               try:
                   repo, pr = os.environ["REPO"], os.environ["PR_NUMBER"]
                   ids = gh("--paginate", f"repos/{repo}/issues/{pr}/comments", "--jq",
-                           f'.[] | select(.body | startswith("{MARKER}")) | .id').split()
+                           f'.[] | select(.user.login == "github-actions[bot]" and '
+                           f'(.body | startswith("{MARKER}"))) | .id').split()
                   payload = json.dumps({"body": MARKER + "\n" + body})
                   if ids:
                       gh("-X", "PATCH", f"repos/{repo}/issues/comments/{ids[0]}", "--input", "-", data=payload)
@@ -139,19 +141,24 @@ jobs:
                   print(f"agent-guardrails: couldn't update the PR comment: {str(e)[:200]}")
 
           def summary(text):
-              path = os.environ.get("GITHUB_STEP_SUMMARY")
-              if path:
-                  with open(path, "a") as f:
-                      f.write(text + "\n")
+              try:
+                  path = os.environ.get("GITHUB_STEP_SUMMARY")
+                  if path:
+                      with open(path, "a") as f:
+                          f.write(text + "\n")
+              except Exception as e:  # noqa: BLE001
+                  print(f"agent-guardrails: couldn't write the job summary: {str(e)[:200]}")
 
           approved = is_approved(json.load(open(sys.argv[1])))
 
           findings = [f"G1: gate file touched: {p}" for _s, p in changed if match(p, GATE)]
+          shown = list(findings)  # what the PR comment shows: never the added line's text
           for status, path in changed:
               if not match(path, TESTS):
                   continue
               if status == "D":
                   findings.append(f"G2: deleted test file: {path}")
+                  shown.append(findings[-1])
                   continue
               diff = git("diff", "--unified=0", "--no-renames", f"{base}...{head}", "--", path)
               for line in (l[1:] for l in diff.splitlines()
@@ -159,6 +166,7 @@ jobs:
                   for pat, label, globs in SKIPS:
                       if (globs is None or match(path, globs)) and re.search(pat, line):
                           findings.append(f"G2: {path}: added {label}: {line.strip()[:120]}")
+                          shown.append(f"G2: {path}: added {label} (the line is in the job log)")
                           break
           for f in findings:
               print(f)
@@ -168,7 +176,11 @@ jobs:
               upsert_comment("**agent-guardrails: passed.** No gate files, deleted tests or new skips "
                              "at the latest commit.", create=False)
               sys.exit(0)
-          listed = "\n".join(f"- `{f}`" for f in findings[:50])
+          # Paths are untrusted: show them in a code block whose fence is longer than any
+          # backtick run in them, so they can't add mentions, links or images.
+          text = "\n".join(shown[:50]) + ("\n..." if len(shown) > 50 else "")
+          fence = "`" * max(3, 1 + max((len(r) for r in re.findall(r"`+", text)), default=0))
+          listed = f"{fence}text\n{text}\n{fence}"
           if approved:
               print("agent-guardrails: PASS (gate-approved by an approver after the latest commit)")
               upsert_comment(f"**agent-guardrails: approved.** `gate-approved` was added after the "

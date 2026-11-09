@@ -273,7 +273,7 @@ class GuardrailScriptTest(unittest.TestCase):
         body = json.loads(w[0]["stdin"])["body"]
         self.assertTrue(body.startswith("<!-- agent-guardrails -->"))
         self.assertIn("waiting for approval from @patelmm79", body)
-        self.assertIn("`G1: gate file touched: CODEOWNERS`", body)
+        self.assertIn("```text\nG1: gate file touched: CODEOWNERS\n```", body)
         self.assertIn("(https://github.com/example/repo/actions/runs/42)", body)
         self.assertIn("waiting for approval", (self.gh_dir / "summary.md").read_text())
 
@@ -315,6 +315,42 @@ class GuardrailScriptTest(unittest.TestCase):
         (self.gh_dir / "comment_ids.txt").write_text("777\n")
         self.assertPass(self.run_check(events=[label("gate-approved", APPROVER, "2026-11-01T12:00:00Z")]),
                         "PASS (gate-approved")
+
+    def test_comment_cannot_be_injected_through_a_path(self):
+        # A path with backticks would close a single-backtick span; the fence must outgrow it.
+        self.fx.write("tests/canaries/x```` @someone [a](https://evil.example).txt", "x\n")
+        self.assertFail(self.run_check(), "G1")
+        body = json.loads(self.writes()[0]["stdin"])["body"]
+        self.assertIn("`````text\n", body)
+        self.assertEqual(body.count("`````"), 2, body)
+
+    def test_comment_never_shows_the_added_line_text(self):
+        self.fx.write("tests/test_app.py",
+                      "import pytest\n\n@pytest.mark.skip  # @someone https://evil.example\n"
+                      "def test_x():\n    assert True\n")
+        r = self.run_check()
+        self.assertFail(r, "evil.example")  # still in the job log
+        body = json.loads(self.writes()[0]["stdin"])["body"]
+        self.assertIn("added pytest skip/xfail marker (the line is in the job log)", body)
+        self.assertNotIn("evil.example", body)
+        self.assertNotIn("evil.example", (self.gh_dir / "summary.md").read_text())
+
+    def test_only_the_bots_own_comment_is_edited(self):
+        self.fx.write("CODEOWNERS", "* @x\n")
+        self.assertFail(self.run_check(), "G1")
+        get = [c for c in self.calls() if "repos/example/repo/issues/1/comments" in c["args"] and "--jq" in c["args"]]
+        self.assertEqual(len(get), 1, self.calls())
+        self.assertIn('.user.login == "github-actions[bot]"', " ".join(get[0]["args"]))
+
+    def test_a_summary_failure_never_fails_an_approved_pr(self):
+        (self.gh_dir / "summary.md").mkdir()  # writing to a directory raises
+        self.fx.write("CODEOWNERS", "* @x\n")
+        r = self.run_check(events=[label("gate-approved", APPROVER, AFTER)])
+        self.assertPass(r, "PASS (gate-approved")
+        self.assertIn("couldn't write the job summary", r.stdout)
+
+    def test_gh_calls_have_a_timeout(self):
+        self.assertIn("timeout=30", embedded_python(self.step["run"]))
 
     def test_deleted_test_file_fails(self):
         self.fx.delete("tests/test_app.py")
