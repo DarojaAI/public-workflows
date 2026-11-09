@@ -33,7 +33,7 @@ BEFORE = "2026-11-01T09:00:00Z"
 AFTER = "2026-11-01T11:00:00Z"
 APPROVER = "patelmm79"
 # Mirrors linux-desktop-seed config/agent-coding.json guardrails.reviewed_path_groups.
-REVIEWED_PATH_GROUPS = [["CODEOWNERS", "*agent-guardrails*", "*claude-guardrails*", "*claude-run*", "*automerge*", "*auto-merge*", "*ready-merge*", "*agent-coding*", "*agent-gh*", "*open-agent-pr*", "*ruleset*", "*branch-protection*", "*branch_protection*", ".semgrep/", "*semgrep_gate*"], ["tests/canaries/**", "**/CODEOWNERS", "**/.semgrepignore", ".semgrep/**", "**/*agent-guardrails*/**", "**/*claude-guardrails*/**", "**/*claude-run*/**", "**/*automerge*/**", "**/*auto-merge*/**", "**/*ready-merge*/**", "**/*agent-coding*/**", "**/*agent-gh*/**", "**/*ruleset*/**", "**/*branch-protection*/**", "**/*branch_protection*/**"], ["**/*agent-guardrails*", "**/*claude-guardrails*", "**/*claude-run*", "**/*automerge*", "**/*auto-merge*", "**/*ready-merge*", "**/*agent-coding*", "**/*agent-gh*", "**/*open-agent-pr*", "**/*ruleset*", "**/*branch-protection*", "**/*branch_protection*", "**/*semgrep_gate*", "**/*semgrep_gate*/**"]]
+REVIEWED_PATH_GROUPS = [["*CODEOWNERS", "*agent-guardrails*", "*claude-guardrails*", "*claude-run*", "*automerge*", "*auto-merge*", "*ready-merge*", "*agent-coding*", "*agent-gh*", "*open-agent-pr*", "*ruleset*", "*branch-protection*", "*branch_protection*", "*semgrep*", "tests/canaries/*"]]
 
 
 def rules_with(groups, team_type="Team", approvals=1):
@@ -459,6 +459,21 @@ class GuardrailScriptTest(unittest.TestCase):
         r = self.run_check(events=[label("gate-approved", APPROVER, AFTER)])
         self.assertIn("G2: deleted test file: tests/test_app.py", r.stdout)
         self.assertPass(r, "PASS (approved by an approver")
+
+
+    def test_a_pattern_only_gitignore_matches_is_not_trusted(self):
+        # "agent-coding.json" (no wildcard) matches config/agent-coding.json as gitignore
+        # (any depth) but not as fnmatch, so G1 must still fail.
+        (self.gh_dir / "rules.json").write_text(json.dumps(rules_with([["agent-coding.json"]])))
+        self.fx.write("config/agent-coding.json", "{}\n")
+        self.assertFail(self.run_check(), "G1: gate file not covered")
+
+    def test_a_pattern_only_fnmatch_matches_is_not_trusted(self):
+        # "con*.json" matches config/agent-coding.json as fnmatch (* crosses /) but not as
+        # gitignore (a pattern with no slash matches one path component).
+        (self.gh_dir / "rules.json").write_text(json.dumps(rules_with([["con*.json"]])))
+        self.fx.write("config/agent-coding.json", "{}\n")
+        self.assertFail(self.run_check(), "G1: gate file not covered")
 
 
 class WorkflowStaticTest(unittest.TestCase):

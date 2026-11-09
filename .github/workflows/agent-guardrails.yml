@@ -19,8 +19,9 @@
 # guardrails.reviewed_path_groups (GitHub's required-reviewer rule), so
 # approving the PR is the whole approval and an armed PR merges at once. G1 here
 # is only a backstop: for each gate file it reads the branch's live rules and
-# defers to GitHub when a required-reviewer pattern covers it (gitignore
-# matching, via git check-ignore). A gate file no live pattern covers fails G1
+# defers to GitHub only when a required-reviewer pattern covers it under both
+# readings GitHub documents: gitignore (git check-ignore) and fnmatch, where `*`
+# also crosses `/`. A gate file no live pattern covers both ways fails G1
 # as before, so a ruleset that didn't apply never leaves gate files open.
 #
 # Applies to agent PRs only: head branch agent/** or author
@@ -190,7 +191,9 @@ jobs:
                   out = subprocess.run(["git", "-C", d, "-c", "core.quotepath=off", "check-ignore",
                                         "--no-index", "--stdin"],
                                        input="\n".join(paths) + "\n", capture_output=True, text=True)
-              return {l for l in out.stdout.splitlines() if l} & set(paths)
+              by_gitignore = {l for l in out.stdout.splitlines() if l} & set(paths)
+              by_fnmatch = {p for p in paths if any(fnmatch.fnmatchcase(p, pat) for pat in pats)}
+              return by_gitignore & by_fnmatch
 
           approved = is_approved(json.load(open(sys.argv[1])), json.load(open(sys.argv[3])))
 
