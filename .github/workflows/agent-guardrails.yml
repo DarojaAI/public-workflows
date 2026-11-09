@@ -19,11 +19,11 @@
 # guardrails, claude-run, merge lanes (auto-merge, ready-merge), agent-coding
 # setup and token minting, rulesets and branch protection, and the Semgrep gate
 # and its baseline (an agent could otherwise accept its own findings). An approver overrides with the
-# `gate-approved` label applied AFTER the PR's latest commit. Ruleset-required
-# workflows only run on the default pull_request activity types, which don't
-# include `labeled`, so a check that finds gate files WAITS up to WAIT_MINUTES
-# for the label instead of failing at once: it passes within about 30s of an
-# approver labelling. After the wait it fails; label, then re-run the check.
+# `gate-approved` label applied AFTER the PR's latest commit. The check never
+# waits (waiting burned Actions minutes): it fails at once, writes the reason to
+# the job summary and keeps one PR comment up to date ("waiting for approval",
+# with the files and a link to re-run). Ruleset-required workflows don't run on
+# `labeled`, so after labelling, re-run the failed check (the comment links it).
 name: agent-guardrails
 
 "on":
@@ -33,13 +33,13 @@ name: agent-guardrails
 permissions:
   contents: read
   pull-requests: read
-  issues: read
+  issues: write  # one status comment on the PR; nothing else is written
 
 jobs:
   agent-guardrails:
     name: agent-guardrails
     runs-on: ubuntu-latest
-    timeout-minutes: 70
+    timeout-minutes: 5
     steps:
       - name: Checkout (full history for the base...head diff)
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803  # v6.1.0
@@ -55,6 +55,7 @@ jobs:
           PR_AUTHOR: ${{ github.event.pull_request.user.login }}
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           APPROVERS: "patelmm79"
         run: |
           set -euo pipefail
@@ -109,8 +110,7 @@ jobs:
           approvers = {x.strip() for x in os.environ["APPROVERS"].split(",") if x.strip()}
           ts = lambda s: dt.datetime.fromisoformat(s.replace("Z", "+00:00"))
           head_ts = ts(sys.argv[2])
-          WAIT_MINUTES = 60
-          POLL_SECONDS = 30
+          MARKER = "<!-- agent-guardrails -->"
 
           def is_approved(events):
               labeled = [e for e in events
@@ -120,13 +120,29 @@ jobs:
               return bool(last and (last.get("actor") or {}).get("login") in approvers
                           and ts(last["created_at"]) > head_ts)
 
-          def fetch_events():
-              out = subprocess.run(
-                  ["gh", "api", "--paginate",
-                   f"repos/{os.environ['REPO']}/issues/{os.environ['PR_NUMBER']}/events",
-                   "--jq", ".[]"],
-                  check=True, capture_output=True, text=True).stdout
-              return json.loads("[" + ",".join(l for l in out.splitlines() if l.strip()) + "]")
+          def gh(*args, data=None):
+              return subprocess.run(["gh", "api", *args], input=data, check=True,
+                                    capture_output=True, text=True).stdout
+
+          def upsert_comment(body, create):
+              # One comment per PR, found by MARKER. A failure here never changes the verdict.
+              try:
+                  repo, pr = os.environ["REPO"], os.environ["PR_NUMBER"]
+                  ids = gh("--paginate", f"repos/{repo}/issues/{pr}/comments", "--jq",
+                           f'.[] | select(.body | startswith("{MARKER}")) | .id').split()
+                  payload = json.dumps({"body": MARKER + "\n" + body})
+                  if ids:
+                      gh("-X", "PATCH", f"repos/{repo}/issues/comments/{ids[0]}", "--input", "-", data=payload)
+                  elif create:
+                      gh("-X", "POST", f"repos/{repo}/issues/{pr}/comments", "--input", "-", data=payload)
+              except Exception as e:  # noqa: BLE001
+                  print(f"agent-guardrails: couldn't update the PR comment: {str(e)[:200]}")
+
+          def summary(text):
+              path = os.environ.get("GITHUB_STEP_SUMMARY")
+              if path:
+                  with open(path, "a") as f:
+                      f.write(text + "\n")
 
           approved = is_approved(json.load(open(sys.argv[1])))
 
@@ -146,24 +162,30 @@ jobs:
                           break
           for f in findings:
               print(f)
+          who = ", ".join(f"@{a}" for a in sorted(approvers))
           if not findings:
               print("agent-guardrails: PASS (no gate files, no deleted tests, no new skips)")
-          elif approved:
+              upsert_comment("**agent-guardrails: passed.** No gate files, deleted tests or new skips "
+                             "at the latest commit.", create=False)
+              sys.exit(0)
+          listed = "\n".join(f"- `{f}`" for f in findings[:50])
+          if approved:
               print("agent-guardrails: PASS (gate-approved by an approver after the latest commit)")
-          else:
-              print(f"agent-guardrails: waiting up to {WAIT_MINUTES} min for `gate-approved` from an "
-                    "approver, applied after the latest commit.", flush=True)
-              deadline = time.time() + WAIT_MINUTES * 60
-              while time.time() < deadline:
-                  time.sleep(POLL_SECONDS)
-                  try:
-                      if is_approved(fetch_events()):
-                          print("agent-guardrails: PASS (gate-approved by an approver after the latest commit)")
-                          sys.exit(0)
-                  except subprocess.CalledProcessError as e:
-                      print(f"agent-guardrails: couldn't read PR events, will retry: {(e.stderr or '').strip()[:200]}",
-                            flush=True)
-              print(f"agent-guardrails: FAIL. No `gate-approved` from an approver within {WAIT_MINUTES} min. "
-                    "Add the label, then re-run this check.")
-              sys.exit(1)
+              upsert_comment(f"**agent-guardrails: approved.** `gate-approved` was added after the "
+                             f"latest commit for:\n{listed}", create=True)
+              summary(f"### agent-guardrails: approved\n{listed}")
+              sys.exit(0)
+          run_url = os.environ.get("RUN_URL", "")
+          body = (f"**agent-guardrails: waiting for approval from {who}.**\n\n"
+                  f"This PR touches files that control the guardrails, or removes or skips tests:\n"
+                  f"{listed}\n\n"
+                  f"To approve: add the `gate-approved` label, then [re-run this check]({run_url}) "
+                  f"(Re-run failed jobs). A new commit needs a new approval.")
+          upsert_comment(body, create=True)
+          summary("### agent-guardrails: waiting for approval\n" + body)
+          print(f"::error title=agent-guardrails::Waiting for `gate-approved` from {who}; "
+                "add the label, then re-run this check.")
+          print("agent-guardrails: FAIL. Needs `gate-approved` from an approver, applied after the "
+                "latest commit. Add the label, then re-run this check.")
+          sys.exit(1)
           PY

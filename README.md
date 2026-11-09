@@ -59,9 +59,11 @@ branch `agent/**`, or author `darojaai-agents[bot]`). Other PRs pass at once.
 An approver named in the file's `APPROVERS` overrides a finding by adding the
 `gate-approved` label **after** the PR's latest commit. Required workflows
 only run on the default `pull_request` activity types, which don't include
-`labeled`. So when the check finds something, it waits up to 60 minutes for
-the label and passes within about 30 seconds of it being added. If the wait
-runs out it fails: add the label, then re-run the check.
+`labeled`, so the check never waits (waiting burns Actions minutes). When it
+finds something it fails within seconds, writes the reason to the job summary,
+and keeps one PR comment up to date: "waiting for approval", with the files and
+a link to the run. Add the label, then re-run the failed check from that link.
+The comment changes to "approved" or "passed" on later runs.
 
 The file is generated, not hand-edited. Its source is the agent-coding
 template in DarojaAI's setup repository (`linux-desktop-seed`,

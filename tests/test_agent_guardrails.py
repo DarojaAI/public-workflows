@@ -36,18 +36,26 @@ APPROVER = "patelmm79"
 FAKE_GH = textwrap.dedent(
     """\
     #!/usr/bin/env python3
-    # Fake `gh api ... issues/N/events --jq '.[]'`: one JSON event per line.
-    # The first call serves events.json; later calls serve events_later.json
-    # when it exists (an approval that arrives while the check waits).
-    import json, os, pathlib
+    # Fake `gh api`. Every call is logged to calls.jsonl (argv and stdin).
+    # - issues/N/events: one JSON event per line from events.json.
+    # - GET issues/N/comments: the ids in comment_ids.txt (one per line), or none.
+    # - -X POST/PATCH: recorded only; fails when comment_write_fails exists.
+    import json, os, pathlib, sys
     d = pathlib.Path(os.environ["FAKE_GH_DIR"])
-    count = d / "count"
-    n = int(count.read_text()) if count.exists() else 0
-    count.write_text(str(n + 1))
-    src = d / "events_later.json"
-    if n == 0 or not src.exists():
-        src = d / "events.json"
-    for event in json.loads(src.read_text()):
+    args = sys.argv[1:]
+    stdin = sys.stdin.read() if "--input" in args else ""
+    with open(d / "calls.jsonl", "a") as f:
+        f.write(json.dumps({"args": args, "stdin": stdin}) + "\\n")
+    if "-X" in args:
+        if (d / "comment_write_fails").exists():
+            sys.exit("HTTP 403: Resource not accessible by integration")
+        sys.exit(0)
+    if any(a.endswith("/comments") for a in args):
+        ids = d / "comment_ids.txt"
+        if ids.exists():
+            print(ids.read_text().strip())
+        sys.exit(0)
+    for event in json.loads((d / "events.json").read_text()):
         print(json.dumps(event))
     """
 )
@@ -134,16 +142,12 @@ class GuardrailScriptTest(unittest.TestCase):
     def tearDown(self) -> None:
         self._tmp.cleanup()
 
-    def run_check(self, *, head_ref="agent/fix-1", author="someone", events=(), later_events=None,
-                  wait_minutes="0", poll_seconds="0", fx=None) -> subprocess.CompletedProcess:
+    def run_check(self, *, head_ref="agent/fix-1", author="someone", events=(),
+                  fx=None) -> subprocess.CompletedProcess:
         fx = fx or self.fx
         head = fx.commit("head", HEAD_DATE)
         (self.gh_dir / "events.json").write_text(json.dumps(list(events)))
-        if later_events is not None:
-            (self.gh_dir / "events_later.json").write_text(json.dumps(list(later_events)))
         run = self.step["run"]
-        run = run.replace("WAIT_MINUTES = 60", f"WAIT_MINUTES = {wait_minutes}", 1)
-        run = run.replace("POLL_SECONDS = 30", f"POLL_SECONDS = {poll_seconds}", 1)
         env = {
             **fx.env,
             "PATH": self.path,
@@ -156,6 +160,8 @@ class GuardrailScriptTest(unittest.TestCase):
             "BASE_SHA": fx.base,
             "HEAD_SHA": head,
             "APPROVERS": self.step["env"]["APPROVERS"],
+            "RUN_URL": "https://github.com/example/repo/actions/runs/42",
+            "GITHUB_STEP_SUMMARY": str(self.gh_dir / "summary.md"),
         }
         return subprocess.run(["bash", "-c", run], cwd=fx.repo, env=env,
                               capture_output=True, text=True, timeout=120)
@@ -190,11 +196,11 @@ class GuardrailScriptTest(unittest.TestCase):
         r = self.run_check(head_ref="feature/x", author="darojaai-agents[bot]")
         self.assertFail(r, "G1: gate file touched: .github/CODEOWNERS")
 
-    def test_gate_file_without_label_fails_after_the_wait(self):
+    def test_gate_file_without_label_fails_at_once(self):
         self.fx.write("CODEOWNERS", "* @someone\n")
         r = self.run_check()
         self.assertFail(r, "G1: gate file touched: CODEOWNERS")
-        self.assertIn("waiting up to 0 min", r.stdout)
+        self.assertIn("::error title=agent-guardrails::Waiting for `gate-approved` from @patelmm79", r.stdout)
 
     def test_gate_file_approved_after_latest_commit_passes(self):
         self.fx.write(".github/workflows/enable-automerge.yml", "on: push\n")
@@ -249,12 +255,66 @@ class GuardrailScriptTest(unittest.TestCase):
         r = self.run_check(events=[label("lgtm", APPROVER, AFTER)])
         self.assertFail(r, "G1")
 
-    def test_approval_arriving_during_the_wait_passes(self):
+    # status comment and summary
+    def calls(self):
+        f = self.gh_dir / "calls.jsonl"
+        return [json.loads(l) for l in f.read_text().splitlines()] if f.exists() else []
+
+    def writes(self):
+        return [c for c in self.calls() if "-X" in c["args"]]
+
+    def test_waiting_posts_one_comment_with_files_and_rerun_link(self):
         self.fx.write("CODEOWNERS", "* @x\n")
-        r = self.run_check(events=[], later_events=[label("gate-approved", APPROVER, AFTER)],
-                           wait_minutes="0.05", poll_seconds="0")
-        self.assertPass(r, "PASS (gate-approved by an approver after the latest commit)")
-        self.assertIn("waiting up to 0.05 min", r.stdout)
+        self.assertFail(self.run_check(), "G1")
+        w = self.writes()
+        self.assertEqual(len(w), 1, w)
+        self.assertIn("POST", w[0]["args"])
+        self.assertTrue(w[0]["args"][-3].endswith("repos/example/repo/issues/1/comments"), w[0]["args"])
+        body = json.loads(w[0]["stdin"])["body"]
+        self.assertTrue(body.startswith("<!-- agent-guardrails -->"))
+        self.assertIn("waiting for approval from @patelmm79", body)
+        self.assertIn("`G1: gate file touched: CODEOWNERS`", body)
+        self.assertIn("(https://github.com/example/repo/actions/runs/42)", body)
+        self.assertIn("waiting for approval", (self.gh_dir / "summary.md").read_text())
+
+    def test_existing_comment_is_updated_not_duplicated(self):
+        (self.gh_dir / "comment_ids.txt").write_text("777\n")
+        self.fx.write("CODEOWNERS", "* @x\n")
+        self.assertFail(self.run_check(), "G1")
+        w = self.writes()
+        self.assertEqual(len(w), 1, w)
+        self.assertIn("PATCH", w[0]["args"])
+        self.assertIn("repos/example/repo/issues/comments/777", w[0]["args"])
+
+    def test_clean_pr_creates_no_comment(self):
+        self.fx.write("src/app.py", "x = 2\n")
+        self.assertPass(self.run_check(), "PASS (no gate files")
+        self.assertEqual(self.writes(), [])
+
+    def test_clean_pr_updates_an_earlier_waiting_comment_to_passed(self):
+        (self.gh_dir / "comment_ids.txt").write_text("777\n")
+        self.fx.write("src/app.py", "x = 2\n")
+        self.assertPass(self.run_check(), "PASS (no gate files")
+        w = self.writes()
+        self.assertEqual(len(w), 1, w)
+        self.assertIn("agent-guardrails: passed", json.loads(w[0]["stdin"])["body"])
+
+    def test_approved_updates_the_comment(self):
+        (self.gh_dir / "comment_ids.txt").write_text("777\n")
+        self.fx.write("CODEOWNERS", "* @x\n")
+        self.assertPass(self.run_check(events=[label("gate-approved", APPROVER, AFTER)]), "PASS (gate-approved")
+        self.assertIn("agent-guardrails: approved", json.loads(self.writes()[0]["stdin"])["body"])
+
+    def test_a_comment_failure_never_changes_the_verdict(self):
+        (self.gh_dir / "comment_write_fails").write_text("")
+        self.fx.write("CODEOWNERS", "* @x\n")
+        r = self.run_check()
+        self.assertFail(r, "G1")
+        self.assertIn("couldn't update the PR comment", r.stdout)
+        self.fx.write("src/app.py", "x = 3\n")
+        (self.gh_dir / "comment_ids.txt").write_text("777\n")
+        self.assertPass(self.run_check(events=[label("gate-approved", APPROVER, "2026-11-01T12:00:00Z")]),
+                        "PASS (gate-approved")
 
     def test_deleted_test_file_fails(self):
         self.fx.delete("tests/test_app.py")
@@ -294,11 +354,16 @@ class WorkflowStaticTest(unittest.TestCase):
             src.write_text(embedded_python(guardrail_step()["run"]))
             py_compile.compile(str(src), doraise=True)
 
-    def test_wait_is_sixty_minutes_polling_every_thirty_seconds(self):
+    def test_never_waits_and_times_out_fast(self):
         body = embedded_python(guardrail_step()["run"])
-        self.assertRegex(body, r"(?m)^WAIT_MINUTES = 60$")
-        self.assertRegex(body, r"(?m)^POLL_SECONDS = 30$")
-        self.assertEqual(load_workflow()["jobs"]["agent-guardrails"]["timeout-minutes"], 70)
+        self.assertNotIn("time.sleep", body)
+        self.assertNotIn("WAIT_MINUTES", body)
+        job = load_workflow()["jobs"]["agent-guardrails"]
+        self.assertLessEqual(job["timeout-minutes"], 5)
+
+    def test_permissions_allow_only_the_status_comment(self):
+        self.assertEqual(load_workflow()["permissions"],
+                         {"contents": "read", "pull-requests": "read", "issues": "write"})
 
     def test_approvers_are_rendered_github_logins(self):
         approvers = guardrail_step()["env"]["APPROVERS"]
