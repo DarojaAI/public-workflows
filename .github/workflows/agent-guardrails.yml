@@ -14,11 +14,14 @@
 # Self-contained on purpose: it runs in every org listed in the config, and a
 # private reusable workflow in another org is not callable.
 #
-# Gate files (the old G1) are no longer checked here. The org ruleset
-# "agent-coding: default branch" requires an approving review from the
-# guardrails.reviewer_team for guardrails.reviewed_paths (GitHub's native
-# required-reviewer rule), so approving the PR is the whole approval and an
-# armed PR merges at once, with no label and no re-run.
+# Gate files (G1) are approved natively: the org ruleset "agent-coding:
+# default branch" requires an approving review from guardrails.reviewer_team on
+# guardrails.reviewed_path_groups (GitHub's required-reviewer rule), so
+# approving the PR is the whole approval and an armed PR merges at once. G1 here
+# is only a backstop: for each gate file it reads the branch's live rules and
+# defers to GitHub when a required-reviewer pattern covers it (gitignore
+# matching, via git check-ignore). A gate file no live pattern covers fails G1
+# as before, so a ruleset that didn't apply never leaves gate files open.
 #
 # Applies to agent PRs only: head branch agent/** or author
 # darojaai-agents[bot]. Other PRs pass. A G2 finding is approved by an
@@ -48,12 +51,13 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
-      - name: G2 test tampering
+      - name: G1 gate-file backstop + G2 test tampering
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
           HEAD_REF: ${{ github.event.pull_request.head.ref }}
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
           PR_AUTHOR: ${{ github.event.pull_request.user.login }}
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
@@ -74,6 +78,13 @@ jobs:
           python3 - "${events}" "${head_date}" "${reviews}" <<'PY'
           import datetime as dt, fnmatch, json, os, re, subprocess, sys, time
 
+          # Files that control the guardrails themselves. Normally gated natively by
+          # the ruleset's required reviewers; checked here only as a backstop.
+          GATE = ["CODEOWNERS", "**/CODEOWNERS", "**agent-guardrails*", "**claude-guardrails*",
+                  "**claude-run*", "**automerge*", "**auto-merge*", "**ready-merge*",
+                  "**agent-coding*", "**agent-gh*", "**open-agent-pr*", "**ruleset*",
+                  "**branch-protection*", "**branch_protection*", ".semgrep/**",
+                  "**.semgrepignore", "**semgrep_gate*", "tests/canaries/**"]
           TESTS = ["tests/**", "test/**", "**/tests/**", "**/test/**", "**/__tests__/**",
                    "**test_*.py", "**_test.py", "**.test.ts", "**.test.tsx", "**.test.js",
                    "**.test.jsx", "**.spec.ts", "**.spec.tsx", "**.spec.js", "**.spec.jsx",
@@ -153,9 +164,40 @@ jobs:
               except Exception as e:  # noqa: BLE001
                   print(f"agent-guardrails: couldn't write the job summary: {str(e)[:200]}")
 
+          def natively_reviewed(paths):
+              """Paths covered by a live required-reviewer pattern (team, >= 1 approval)."""
+              if not paths:
+                  return set()
+              try:
+                  rules = json.loads(gh(f"repos/{os.environ['REPO']}/rules/branches/{os.environ['BASE_REF']}"))
+              except Exception as e:  # noqa: BLE001
+                  print(f"agent-guardrails: couldn't read the branch rules: {str(e)[:200]}")
+                  return set()
+              pats = [fp for r in rules if r.get("type") == "pull_request"
+                      for rr in ((r.get("parameters") or {}).get("required_reviewers") or [])
+                      if (rr.get("minimum_approvals") or 0) >= 1
+                      and (rr.get("reviewer") or {}).get("type") == "Team"
+                      for fp in (rr.get("file_patterns") or []) if isinstance(fp, str)]
+              if not pats:
+                  return set()
+              import tempfile
+              with tempfile.TemporaryDirectory() as d:
+                  subprocess.run(["git", "init", "-q", d], check=True)
+                  with open(os.path.join(d, ".gitignore"), "w") as f:
+                      f.write("\n".join(pats) + "\n")
+                  out = subprocess.run(["git", "-C", d, "check-ignore", "--no-index", "--stdin"],
+                                       input="\n".join(paths) + "\n", capture_output=True, text=True)
+              return {l for l in out.stdout.splitlines() if l} & set(paths)
+
           approved = is_approved(json.load(open(sys.argv[1])), json.load(open(sys.argv[3])))
 
-          findings, shown = [], []  # shown is what the PR comment shows: never the added line's text
+          gated = [p for _s, p in changed if match(p, GATE)]
+          native = natively_reviewed(gated)
+          for p in sorted(native):
+              print(f"agent-guardrails: {p}: approval required natively (ruleset required reviewers)")
+          findings = [f"G1: gate file not covered by the ruleset's required reviewers: {p}"
+                      for p in gated if p not in native]
+          shown = list(findings)  # what the PR comment shows: never the added line's text
           for status, path in changed:
               if not match(path, TESTS):
                   continue
@@ -175,9 +217,9 @@ jobs:
               print(f)
           who = ", ".join(f"@{a}" for a in sorted(approvers))
           if not findings:
-              print("agent-guardrails: PASS (no deleted tests, no new skips)")
-              upsert_comment("**agent-guardrails: passed.** No deleted tests or new skips "
-                             "at the latest commit.", create=False)
+              print("agent-guardrails: PASS (no uncovered gate files, no deleted tests, no new skips)")
+              upsert_comment("**agent-guardrails: passed.** No uncovered gate files, deleted tests or "
+                             "new skips at the latest commit.", create=False)
               sys.exit(0)
           # Paths are untrusted: show them in a code block whose fence is longer than any
           # backtick run in them, so they can't add mentions, links or images.
@@ -192,7 +234,7 @@ jobs:
               sys.exit(0)
           run_url = os.environ.get("RUN_URL", "")
           body = (f"**agent-guardrails: waiting for approval from {who}.**\n\n"
-                  f"This PR removes or skips tests:\n"
+                  f"This PR removes or skips tests, or touches gate files the ruleset doesn't cover:\n"
                   f"{listed}\n\n"
                   f"To approve: approve the PR, then [re-run this check]({run_url}) "
                   f"(Re-run failed jobs). A new commit needs a new approval.")

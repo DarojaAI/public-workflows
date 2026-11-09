@@ -43,11 +43,13 @@ default branch" requires it on the default branch of every repo whose
 `agent-coding` custom property is true. It applies only to agent PRs (head
 branch `agent/**`, or author `darojaai-agents[bot]`). Other PRs pass at once.
 
-- **Gate files** are no longer checked here. Since v2.0.0 the org ruleset
-  requires an approving review from the `guardrail-approvers` team on the
-  guarded paths (GitHub's native required-reviewer rule, configured in
-  DarojaAI/linux-desktop-seed `config/agent-coding.json`), so approving the PR
-  is the whole approval.
+- **Gate files** are approved natively: since v2.0.0 the org ruleset requires an
+  approving review from the `guardrail-approvers` team on the guarded paths
+  (GitHub's required-reviewer rule, configured in DarojaAI/linux-desktop-seed
+  `config/agent-coding.json`), so approving the PR is the whole approval. **G1**
+  here is only a backstop: it reads the branch's live rules and fails a gate
+  file that no required-reviewer pattern covers (gitignore matching via
+  `git check-ignore`).
 - **G2, test tampering:** the PR deletes a test file, or adds a skip to one
   (pytest or unittest skip/xfail, JS `.skip`/`.todo`/`x`-tests, bats `skip`,
   Go `t.Skip`, or `|| true`).

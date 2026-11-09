@@ -27,11 +27,19 @@ import yaml
 
 ROOT = Path(__file__).resolve().parent.parent
 WORKFLOW = ROOT / ".github" / "workflows" / "agent-guardrails.yml"
-STEP_NAME = "G2 test tampering"
+STEP_NAME = "G1 gate-file backstop + G2 test tampering"
 HEAD_DATE = "2026-11-01T10:00:00+00:00"
 BEFORE = "2026-11-01T09:00:00Z"
 AFTER = "2026-11-01T11:00:00Z"
 APPROVER = "patelmm79"
+# Mirrors linux-desktop-seed config/agent-coding.json guardrails.reviewed_path_groups.
+REVIEWED_PATH_GROUPS = [["CODEOWNERS", "*agent-guardrails*", "*claude-guardrails*", "*claude-run*", "*automerge*", "*auto-merge*", "*ready-merge*", "*agent-coding*", "*agent-gh*", "*open-agent-pr*", "*ruleset*", "*branch-protection*", "*branch_protection*", ".semgrep/", "*semgrep_gate*"], ["tests/canaries/**", "**/CODEOWNERS", "**/.semgrepignore", ".semgrep/**", "**/*agent-guardrails*/**", "**/*claude-guardrails*/**", "**/*claude-run*/**", "**/*automerge*/**", "**/*auto-merge*/**", "**/*ready-merge*/**", "**/*agent-coding*/**", "**/*agent-gh*/**", "**/*ruleset*/**", "**/*branch-protection*/**", "**/*branch_protection*/**"], ["**/*agent-guardrails*", "**/*claude-guardrails*", "**/*claude-run*", "**/*automerge*", "**/*auto-merge*", "**/*ready-merge*", "**/*agent-coding*", "**/*agent-gh*", "**/*open-agent-pr*", "**/*ruleset*", "**/*branch-protection*", "**/*branch_protection*", "**/*semgrep_gate*", "**/*semgrep_gate*/**"]]
+
+
+def rules_with(groups, team_type="Team", approvals=1):
+    return [{"type": "pull_request", "parameters": {"required_reviewers": [
+        {"minimum_approvals": approvals, "file_patterns": g, "reviewer": {"id": 1, "type": team_type}}
+        for g in groups]}}]
 
 FAKE_GH = textwrap.dedent(
     """\
@@ -40,6 +48,7 @@ FAKE_GH = textwrap.dedent(
     # - issues/N/events: one JSON event per line from events.json.
     # - GET issues/N/comments: the ids in comment_ids.txt (one per line), or none.
     # - pulls/N/reviews: one JSON review per line from reviews.json, or none.
+    # - rules/branches/B: the JSON array in rules.json, or [].
     # - -X POST/PATCH: recorded only; fails when comment_write_fails exists.
     import json, os, pathlib, sys
     d = pathlib.Path(os.environ["FAKE_GH_DIR"])
@@ -50,6 +59,10 @@ FAKE_GH = textwrap.dedent(
     if "-X" in args:
         if (d / "comment_write_fails").exists():
             sys.exit("HTTP 403: Resource not accessible by integration")
+        sys.exit(0)
+    if any("/rules/branches/" in a for a in args):
+        f = d / "rules.json"
+        print(f.read_text() if f.exists() else "[]")
         sys.exit(0)
     if any(a.endswith("/reviews") for a in args):
         f = d / "reviews.json"
@@ -166,6 +179,7 @@ class GuardrailScriptTest(unittest.TestCase):
             "HEAD_REF": head_ref,
             "PR_AUTHOR": author,
             "BASE_SHA": fx.base,
+            "BASE_REF": "main",
             "HEAD_SHA": head,
             "APPROVERS": self.step["env"]["APPROVERS"],
             "RUN_URL": "https://github.com/example/repo/actions/runs/42",
@@ -197,22 +211,67 @@ class GuardrailScriptTest(unittest.TestCase):
     # agent PRs
     def test_agent_branch_without_findings_passes(self):
         self.fx.write("src/app.py", "x = 2\n")
-        self.assertPass(self.run_check(), "PASS (no deleted tests")
+        self.assertPass(self.run_check(), "PASS (no uncovered gate files")
 
     def test_agent_app_author_on_any_branch_is_checked(self):
         self.fx.delete("tests/test_app.py")
         r = self.run_check(head_ref="feature/x", author="darojaai-agents[bot]")
         self.assertFail(r, "G2: deleted test file: tests/test_app.py")
 
-    def test_gate_files_are_left_to_the_ruleset_required_reviewers(self):
-        # The org ruleset's required-reviewer rule gates these natively now.
-        for path in ["CODEOWNERS", ".github/workflows/agent-guardrails.yml",
-                     "config/agent-coding.json", ".github/workflows/automerge.yml",
-                     ".semgrep/baseline.json", "tests/canaries/c.py"]:
+    TIER1 = ["CODEOWNERS", ".github/CODEOWNERS", "docs/CODEOWNERS",
+                 ".github/workflows/agent-guardrails.yml", "config/agent-coding/agent-guardrails.yml",
+                 ".github/workflows/claude-run.yml", ".claude-run/x.sh", ".github/workflows/enable-automerge.yml",
+                 ".github/workflows/reusable-auto-merge.yml", "config/agent-coding.json", "agent-coding.md",
+                 ".github/workflows/agent-coding-setup.yml",
+                 "scripts/maintenance/agent-coding-org-setup.sh",
+                 "scripts/agent-coding/container/gh", "scripts/agent-coding/agent-gh-mint.sh",
+                 ".github/rulesets/main.json", "tests/canaries/c.py", "tests/canaries/deep/d.py",
+                 ".github/workflows/ready-merge.yml", "src/automerge/x.py", "src/branch-protection/x.py",
+                 ".github/workflows/install-agent-gh-minter.yml",
+                 "etc/systemd/system/agent-gh-mint.timer",
+                 ".github/workflows/reusable-claude-guardrails.yml",
+                 "tool/check/claude-guardrails/scripts/guardrails.py",
+                 ".github/workflows/apply-branch-protection.yml",
+                 "scripts/sync_branch_protection.py", "scripts/apply-rulesets.sh",
+                 ".semgrep/baseline.json", ".semgrep/rules/x.yml", ".semgrepignore", "api/.semgrepignore",
+                 "scripts/semgrep_gate.py", "tests/test_semgrep_gate.py",
+                 ".github/workflows/open-agent-pr.yml"]
+
+    def test_gate_files_covered_by_live_required_reviewers_defer_to_github(self):
+        (self.gh_dir / "rules.json").write_text(json.dumps(rules_with(REVIEWED_PATH_GROUPS)))
+        for path in self.TIER1:
             with self.subTest(path=path):
                 fx = Fixture(self._subdir(path))
                 fx.write(path, "x\n")
-                self.assertPass(self.run_check(fx=fx), "PASS (no deleted tests")
+                r = self.run_check(fx=fx)
+                self.assertPass(r, "PASS (no uncovered gate files")
+                self.assertIn(f"{path}: approval required natively", r.stdout)
+
+    def test_gate_files_fail_g1_when_no_live_rule_covers_them(self):
+        cases = {"no rules": [], "no reviewers": [{"type": "pull_request", "parameters": {}}],
+                 "zero approvals": rules_with(REVIEWED_PATH_GROUPS, approvals=0),
+                 "not a team": rules_with(REVIEWED_PATH_GROUPS, team_type="User"),
+                 "other paths only": rules_with([["docs/**"]])}
+        for name, rules in cases.items():
+            with self.subTest(name):
+                self.tearDown(); self.setUp()
+                (self.gh_dir / "rules.json").write_text(json.dumps(rules))
+                self.fx.write("config/agent-coding.json", "{}\n")
+                self.assertFail(self.run_check(),
+                                "G1: gate file not covered by the ruleset's required reviewers: config/agent-coding.json")
+
+    def test_uncovered_g1_is_cleared_by_an_approving_review(self):
+        self.fx.write("CODEOWNERS", "* @x\n")
+        r = self.run_check(reviews=[self.review()])
+        self.assertPass(r, "PASS (approved by an approver")
+
+    def test_ordinary_files_are_not_gate_files(self):
+        for path in [".github/workflows/ci.yml", ".github/dependabot.yml", ".pre-commit-config.yaml",
+                     ".coveragerc", "codecov.yml", ".github/workflows/semgrep.yml", "src/app2.py"]:
+            with self.subTest(path=path):
+                fx = Fixture(self._subdir(path))
+                fx.write(path, "x\n")
+                self.assertPass(self.run_check(fx=fx), "PASS (no uncovered gate files")
 
     def test_g2_without_approval_fails_at_once(self):
         self.fx.delete("tests/test_app.py")
@@ -296,13 +355,13 @@ class GuardrailScriptTest(unittest.TestCase):
 
     def test_clean_pr_creates_no_comment(self):
         self.fx.write("src/app.py", "x = 2\n")
-        self.assertPass(self.run_check(), "PASS (no deleted tests")
+        self.assertPass(self.run_check(), "PASS (no uncovered gate files")
         self.assertEqual(self.writes(), [])
 
     def test_clean_pr_updates_an_earlier_waiting_comment_to_passed(self):
         (self.gh_dir / "comment_ids.txt").write_text("777\n")
         self.fx.write("src/app.py", "x = 2\n")
-        self.assertPass(self.run_check(), "PASS (no deleted tests")
+        self.assertPass(self.run_check(), "PASS (no uncovered gate files")
         w = self.writes()
         self.assertEqual(len(w), 1, w)
         self.assertIn("agent-guardrails: passed", json.loads(w[0]["stdin"])["body"])
@@ -380,7 +439,7 @@ class GuardrailScriptTest(unittest.TestCase):
 
     def test_skip_pattern_outside_tests_is_not_g2(self):
         self.fx.write("src/app.py", "x = 1 or True  # || true\n")
-        self.assertPass(self.run_check(), "PASS (no deleted tests")
+        self.assertPass(self.run_check(), "PASS (no uncovered gate files")
 
     def test_approved_g2_finding_passes(self):
         self.fx.delete("tests/test_app.py")
