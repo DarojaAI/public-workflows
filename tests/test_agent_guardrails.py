@@ -223,7 +223,7 @@ class GuardrailScriptTest(unittest.TestCase):
                      ".github/workflows/apply-branch-protection.yml",
                      "scripts/sync_branch_protection.py", "scripts/apply-rulesets.sh",
                      ".semgrep/baseline.json", ".semgrepignore", "api/.semgrepignore",
-                     "scripts/semgrep_gate.py"]:
+                     "scripts/semgrep_gate.py", "tests/test_semgrep_gate.py"]:
             with self.subTest(path=path):
                 fx = Fixture(self._subdir(path))
                 fx.write(path, "x\n")
