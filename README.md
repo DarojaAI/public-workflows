@@ -51,7 +51,11 @@ branch `agent/**`, or author `darojaai-agents[bot]`). Other PRs pass at once.
   (`**ruleset*`, `**branch-protection*`, `**branch_protection*`), the Semgrep
   gate and its baseline (`.semgrep/**`, `**.semgrepignore`, `**semgrep_gate*`),
   or `tests/canaries/**`. Ordinary workflows, pre-commit and coverage config are
-  not gated here.
+  not gated here. A gate file whose only change moves `DarojaAI/<repo>/...@vX.Y.Z`
+  pins to newer release tags (same repo and path, every other byte identical)
+  isn't gated either: a tag can only point at code merged on that repo's
+  guarded `main`. Downgrades, branch refs, other actions and any other edit
+  are still gated.
 - **G2, test tampering:** the PR deletes a test file, or adds a skip to one
   (pytest or unittest skip/xfail, JS `.skip`/`.todo`/`x`-tests, bats `skip`,
   Go `t.Skip`, or `|| true`).

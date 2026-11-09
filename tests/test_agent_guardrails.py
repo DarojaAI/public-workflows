@@ -352,6 +352,46 @@ class GuardrailScriptTest(unittest.TestCase):
     def test_gh_calls_have_a_timeout(self):
         self.assertIn("timeout=30", embedded_python(self.step["run"]))
 
+    AM = ".github/workflows/automerge.yml"
+    AM_BASE = ("jobs:\n  am:\n"
+               "    uses: DarojaAI/infra-actions/.github/workflows/reusable-enable-pr-automerge.yml@v1.50.2  # pin\n"
+               "    secrets: inherit\n"
+               "  co:\n    steps:\n      - uses: actions/checkout@v4\n")
+
+    def bump_case(self, head_text):
+        self.fx.write(self.AM, self.AM_BASE)
+        self.fx.base = self.fx.commit("base2", "2026-10-31T11:00:00+00:00")
+        self.fx.write(self.AM, head_text)
+        return self.run_check()
+
+    def test_pure_darojaai_pin_bump_in_a_gate_file_is_not_gated(self):
+        r = self.bump_case(self.AM_BASE.replace("@v1.50.2", "@v1.79.1"))
+        self.assertPass(r, "PASS (no gate files")
+        self.assertIn("only DarojaAI pins moved to newer tags; not gated", r.stdout)
+        self.assertEqual(self.writes(), [])
+
+    def test_pin_bump_with_any_other_change_is_gated(self):
+        cases = {
+            "extra line": self.AM_BASE.replace("@v1.50.2", "@v1.79.1") + "    permissions: write-all\n",
+            "changed comment": self.AM_BASE.replace("@v1.50.2  # pin", "@v1.79.1  # other"),
+            "downgrade": self.AM_BASE.replace("@v1.50.2", "@v1.49.0"),
+            "other reusable": self.AM_BASE.replace("reusable-enable-pr-automerge.yml@v1.50.2",
+                                                   "reusable-evil.yml@v1.79.1"),
+            "other repo": self.AM_BASE.replace("DarojaAI/infra-actions/", "DarojaAI/other/"),
+            "branch ref": self.AM_BASE.replace("@v1.50.2", "@main"),
+            "non-DarojaAI action": self.AM_BASE.replace("checkout@v4", "checkout@v5"),
+            "final newline dropped": self.AM_BASE.replace("@v1.50.2", "@v1.79.1").rstrip("\n"),
+            "line removed": self.AM_BASE.replace("    secrets: inherit\n", ""),
+        }
+        for name, text in cases.items():
+            with self.subTest(name):
+                self.tearDown(); self.setUp()
+                self.assertFail(self.bump_case(text), "G1: gate file touched: " + self.AM)
+
+    def test_new_gate_file_with_a_pin_is_gated(self):
+        self.fx.write(self.AM, self.AM_BASE)
+        self.assertFail(self.run_check(), "G1: gate file touched: " + self.AM)
+
     def test_deleted_test_file_fails(self):
         self.fx.delete("tests/test_app.py")
         self.assertFail(self.run_check(), "G2: deleted test file: tests/test_app.py")

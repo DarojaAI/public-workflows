@@ -151,7 +151,39 @@ jobs:
 
           approved = is_approved(json.load(open(sys.argv[1])))
 
-          findings = [f"G1: gate file touched: {p}" for _s, p in changed if match(p, GATE)]
+          # A gate file whose only change is moving DarojaAI reusable pins to newer
+          # release tags (same repo and path, every other byte identical) isn't
+          # gated: a tag can only point at code merged on that repo's guarded main.
+          PIN = re.compile(r"(DarojaAI/[\w.-]+/[^@\s'\"]+)@v(\d+)\.(\d+)\.(\d+)(?![\w.-])")
+
+          def pin_bump_only(status, path):
+              if status != "M":
+                  return False
+              diff = git("diff", "--unified=0", "--no-renames", f"{base}...{head}", "--", path)
+              if "\\ No newline" in diff:
+                  return False
+              body = [l for l in diff.splitlines()
+                      if not l.startswith(("diff ", "index ", "--- ", "+++ ", "@@"))]
+              rem = [l[1:] for l in body if l.startswith("-")]
+              add = [l[1:] for l in body if l.startswith("+")]
+              if not rem or len(rem) != len(add) or len(body) != len(rem) + len(add):
+                  return False
+              for r, a in zip(rem, add):
+                  if PIN.sub(r"\1@TAG", r) != PIN.sub(r"\1@TAG", a):
+                      return False
+                  olds = [tuple(map(int, m[1:])) for m in PIN.findall(r)]
+                  news = [tuple(map(int, m[1:])) for m in PIN.findall(a)]
+                  if not olds or any(n < o for o, n in zip(olds, news)) or olds == news:
+                      return False
+              return True
+
+          findings, bumps = [], []
+          for s_, p in changed:
+              if match(p, GATE):
+                  (bumps if pin_bump_only(s_, p) else findings).append(p)
+          for p in bumps:
+              print(f"agent-guardrails: {p}: only DarojaAI pins moved to newer tags; not gated")
+          findings = [f"G1: gate file touched: {p}" for p in findings]
           shown = list(findings)  # what the PR comment shows: never the added line's text
           for status, path in changed:
               if not match(path, TESTS):
