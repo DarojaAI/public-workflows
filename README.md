@@ -48,8 +48,9 @@ branch `agent/**`, or author `darojaai-agents[bot]`). Other PRs pass at once.
   `**claude-guardrails*`, `**claude-run*`, merge lanes (`**automerge*`,
   `**auto-merge*`, `**ready-merge*`), agent-coding setup and token minting
   (`**agent-coding*`, `**agent-gh*`), rulesets and branch protection
-  (`**ruleset*`, `**branch-protection*`, `**branch_protection*`), or
-  `tests/canaries/**`. Ordinary workflows, pre-commit and coverage config are
+  (`**ruleset*`, `**branch-protection*`, `**branch_protection*`), the Semgrep
+  gate and its baseline (`.semgrep/**`, `**.semgrepignore`, `**semgrep_gate*`),
+  or `tests/canaries/**`. Ordinary workflows, pre-commit and coverage config are
   not gated here.
 - **G2, test tampering:** the PR deletes a test file, or adds a skip to one
   (pytest or unittest skip/xfail, JS `.skip`/`.todo`/`x`-tests, bats `skip`,
