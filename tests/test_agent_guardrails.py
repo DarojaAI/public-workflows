@@ -221,7 +221,9 @@ class GuardrailScriptTest(unittest.TestCase):
                      ".github/workflows/reusable-claude-guardrails.yml",
                      "tool/check/claude-guardrails/scripts/guardrails.py",
                      ".github/workflows/apply-branch-protection.yml",
-                     "scripts/sync_branch_protection.py", "scripts/apply-rulesets.sh"]:
+                     "scripts/sync_branch_protection.py", "scripts/apply-rulesets.sh",
+                     ".semgrep/baseline.json", ".semgrepignore", "api/.semgrepignore",
+                     "scripts/semgrep_gate.py", "tests/test_semgrep_gate.py"]:
             with self.subTest(path=path):
                 fx = Fixture(self._subdir(path))
                 fx.write(path, "x\n")
@@ -231,7 +233,7 @@ class GuardrailScriptTest(unittest.TestCase):
     def test_ordinary_workflow_and_config_changes_are_not_gated(self):
         for path in [".github/workflows/ci.yml", ".github/dependabot.yml",
                      ".pre-commit-config.yaml", ".coveragerc", "codecov.yml",
-                     ".github/workflows/pre-merge-check.yml", ".semgrep/baseline.json"]:
+                     ".github/workflows/pre-merge-check.yml", ".github/workflows/semgrep.yml"]:
             with self.subTest(path=path):
                 fx = Fixture(self._subdir(path))
                 fx.write(path, "x\n")
