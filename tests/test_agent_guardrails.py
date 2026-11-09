@@ -265,6 +265,19 @@ class GuardrailScriptTest(unittest.TestCase):
         r = self.run_check(reviews=[self.review()])
         self.assertPass(r, "PASS (approved by an approver")
 
+    def test_non_ascii_paths_are_still_matched(self):
+        self.fx.write("tests/canaries/é.txt", "x\n")
+        self.assertFail(self.run_check(), "G1: gate file not covered by the ruleset's required reviewers: tests/canaries/é.txt")
+        self.tearDown(); self.setUp()
+        (self.gh_dir / "rules.json").write_text(json.dumps(rules_with(REVIEWED_PATH_GROUPS)))
+        self.fx.write("tests/canaries/é.txt", "x\n")
+        self.assertPass(self.run_check(), "PASS (no uncovered gate files")
+        self.tearDown(); self.setUp()
+        self.fx.delete("tests/test_app.py"); self.fx.write("tests/é_test.py", "def test_a():\n    pass\n")
+        self.fx.git("add", "-A"); self.fx.base = self.fx.commit("b3", "2026-10-31T12:00:00+00:00")
+        self.fx.delete("tests/é_test.py")
+        self.assertFail(self.run_check(), "G2: deleted test file: tests/é_test.py")
+
     def test_ordinary_files_are_not_gate_files(self):
         for path in [".github/workflows/ci.yml", ".github/dependabot.yml", ".pre-commit-config.yaml",
                      ".coveragerc", "codecov.yml", ".github/workflows/semgrep.yml", "src/app2.py"]:

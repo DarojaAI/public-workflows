@@ -105,7 +105,9 @@ jobs:
               return any(fnmatch.fnmatchcase(p, g.replace("**", "*")) for g in globs)
 
           def git(*a):
-              return subprocess.run(["git", *a], check=True, capture_output=True, text=True).stdout
+              # quotepath off: non-ASCII paths stay plain, so the globs match them.
+              return subprocess.run(["git", "-c", "core.quotepath=off", *a], check=True,
+                                    capture_output=True, text=True).stdout
 
           base, head = os.environ["BASE_SHA"], os.environ["HEAD_SHA"]
           rows = [l.split("\t") for l in git("diff", "--name-status", "--no-renames",
@@ -185,7 +187,8 @@ jobs:
                   subprocess.run(["git", "init", "-q", d], check=True)
                   with open(os.path.join(d, ".gitignore"), "w") as f:
                       f.write("\n".join(pats) + "\n")
-                  out = subprocess.run(["git", "-C", d, "check-ignore", "--no-index", "--stdin"],
+                  out = subprocess.run(["git", "-C", d, "-c", "core.quotepath=off", "check-ignore",
+                                        "--no-index", "--stdin"],
                                        input="\n".join(paths) + "\n", capture_output=True, text=True)
               return {l for l in out.stdout.splitlines() if l} & set(paths)
 
