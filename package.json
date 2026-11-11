@@ -1,0 +1,12 @@
+{
+  "name": "public-workflows-release",
+  "private": true,
+  "description": "Pinned tooling for the automatic release (.github/workflows/release.yml). Not a published package.",
+  "devDependencies": {
+    "@semantic-release/commit-analyzer": "13.0.1",
+    "@semantic-release/github": "11.0.6",
+    "@semantic-release/release-notes-generator": "14.1.1",
+    "conventional-changelog-conventionalcommits": "9.3.1",
+    "semantic-release": "24.2.9"
+  }
+}

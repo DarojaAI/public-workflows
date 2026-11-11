@@ -18,8 +18,9 @@ name: release
     branches: [main]
   workflow_dispatch:
 
-permissions:
-  contents: write
+# No permissions by default; each job asks for exactly what it needs, so a
+# job added later does not inherit write access.
+permissions: {}
 
 concurrency:
   group: release
@@ -31,6 +32,8 @@ jobs:
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803  # v6.1.0
         with:
@@ -40,19 +43,15 @@ jobs:
       - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e  # v6.4.0
         with:
           node-version: "22"
-      # Keep these versions together: commit-analyzer 11 and notes-generator 12
-      # cannot read conventional-changelog-conventionalcommits 9 (it exports
-      # `parser`, they read `parserOpts`), which silently drops the `feat!:`
-      # breaking-change header. 13 and 14 read it.
-      - name: Install semantic-release (exact versions)
-        run: |
-          set -euo pipefail
-          npm install --no-save --no-package-lock --ignore-scripts \
-            semantic-release@24.2.9 \
-            @semantic-release/commit-analyzer@13.0.1 \
-            @semantic-release/release-notes-generator@14.1.1 \
-            @semantic-release/github@11.0.6 \
-            conventional-changelog-conventionalcommits@9.3.1
+      # package.json pins the five packages to exact versions and
+      # package-lock.json pins every transitive dependency, so the release
+      # tooling is reproducible. Keep the five together: commit-analyzer 11.x
+      # cannot use conventional-changelog-conventionalcommits 9 (it exports
+      # `parser`, 11.x reads `parserOpts`): 11.0.0 throws
+      # `TypeError: ... is not a function`, and 11.1.0 silently drops the
+      # `feat!:` breaking-change header. 13 and 14 read it.
+      - name: Install semantic-release (locked)
+        run: npm ci --ignore-scripts --no-audit --no-fund
       - name: Refuse to reuse an existing tag
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -61,12 +60,17 @@ jobs:
           out="$(./node_modules/.bin/semantic-release --dry-run 2>&1 || true)"
           printf '%s\n' "$out" | tail -30
           next="$(printf '%s\n' "$out" | grep -oP 'next release version is \K\S+' | head -1 || true)"
-          if [ -z "$next" ]; then
+          if [ -n "$next" ]; then
+            if git ls-remote --tags origin "refs/tags/v${next}" | grep -q "refs/tags/v${next}$"; then
+              echo "::error::Tag v${next} already exists on origin. Not moving or deleting it; resolve by hand."
+              exit 1
+            fi
+          elif printf '%s\n' "$out" | grep -q 'no relevant changes, so no new version is released'; then
             echo "No release pending."
-            exit 0
-          fi
-          if git ls-remote --tags origin "refs/tags/v${next}" | grep -q "refs/tags/v${next}$"; then
-            echo "::error::Tag v${next} already exists on origin. Not moving or deleting it; resolve by hand."
+          else
+            # Neither a next version nor the known "nothing to release" line:
+            # something else went wrong (auth, config, a crash). Do not go on.
+            echo "::error::Dry run gave neither a next version nor the 'no relevant changes' line. Failing closed."
             exit 1
           fi
       - name: Release
