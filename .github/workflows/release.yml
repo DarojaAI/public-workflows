@@ -1,0 +1,75 @@
+# Cuts a semver release (tag vX.Y.Z plus a GitHub release) for every merge to
+# main whose commits call for one. Rules live in .releaserc.json: ci and fix
+# are patch, feat is minor, a breaking change is major; docs, test, chore and
+# the rest cut nothing. semantic-release reads the individual commits, so the
+# commits inside a merged "Merge pull request #N" count, not the merge commit.
+#
+# Rulesets pin agent-guardrails.yml by tag, so a release changes nothing for
+# consumers until the setup repo's pin is bumped to it.
+#
+# Safety: GITHUB_TOKEN with contents: write only; it never deletes or moves a
+# tag, and fails loudly if the next tag already exists. Everything is pinned
+# (actions by commit SHA, npm packages by exact version). The runner is
+# GitHub-hosted on purpose: this repo is public.
+name: release
+
+"on":
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: release
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803  # v6.1.0
+        with:
+          # semantic-release walks history back to the last release tag.
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e  # v6.4.0
+        with:
+          node-version: "22"
+      # Keep these versions together: commit-analyzer 11 and notes-generator 12
+      # cannot read conventional-changelog-conventionalcommits 9 (it exports
+      # `parser`, they read `parserOpts`), which silently drops the `feat!:`
+      # breaking-change header. 13 and 14 read it.
+      - name: Install semantic-release (exact versions)
+        run: |
+          set -euo pipefail
+          npm install --no-save --no-package-lock --ignore-scripts \
+            semantic-release@24.2.9 \
+            @semantic-release/commit-analyzer@13.0.1 \
+            @semantic-release/release-notes-generator@14.1.1 \
+            @semantic-release/github@11.0.6 \
+            conventional-changelog-conventionalcommits@9.3.1
+      - name: Refuse to reuse an existing tag
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          out="$(./node_modules/.bin/semantic-release --dry-run 2>&1 || true)"
+          printf '%s\n' "$out" | tail -30
+          next="$(printf '%s\n' "$out" | grep -oP 'next release version is \K\S+' | head -1 || true)"
+          if [ -z "$next" ]; then
+            echo "No release pending."
+            exit 0
+          fi
+          if git ls-remote --tags origin "refs/tags/v${next}" | grep -q "refs/tags/v${next}$"; then
+            echo "::error::Tag v${next} already exists on origin. Not moving or deleting it; resolve by hand."
+            exit 1
+          fi
+      - name: Release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: ./node_modules/.bin/semantic-release

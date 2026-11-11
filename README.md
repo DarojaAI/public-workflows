@@ -100,8 +100,8 @@ Run the tests locally with `pip install pyyaml==6.0.2`, then
 
 ## Releases and pinning
 
-Releases are semver tags `vMAJOR.MINOR.PATCH`, cut from `main` after a PR
-merges and CI is green.
+Releases are semver tags `vMAJOR.MINOR.PATCH`, cut automatically on merge to
+`main` (see "Automatic releases" below).
 
 - **Rulesets pin a tag.** The DarojaAI ruleset requires
   `.github/workflows/agent-guardrails.yml` at `refs/tags/v1.0.0`; GitHub's
@@ -123,14 +123,28 @@ merges and CI is green.
   MINOR for behaviour that is stricter or adds options, MAJOR for anything a
   consumer must adapt to (a renamed check, a removed input).
 
-Cutting a release (maintainer, after the PR merges):
+### Automatic releases
 
-```bash
-git switch main && git pull --ff-only
-git tag -a v1.0.0 -m "agent-guardrails v1.0.0"
-git push origin v1.0.0
-```
+`.github/workflows/release.yml` runs on every push to `main` (and on manual
+dispatch) and cuts the next tag and GitHub release with semantic-release, so
+nobody tags by hand. It reads the individual commits, so the commits inside a
+merged "Merge pull request #N" count, not the merge commit. Rules are in
+`.releaserc.json` (conventional commits):
 
-Then, for the guardrail: bump the ref in the setup repo's config if it
-changed, and dispatch its "Agent Coding Setup" workflow so the ruleset points
-at the new tag.
+| Commit | Release |
+| --- | --- |
+| `ci:`, `fix:` | patch |
+| `feat:` | minor |
+| `!` after the type, or a `BREAKING CHANGE:` footer | major |
+| `docs:`, `test:`, `chore:`, `refactor:`, `style:`, `build:`, `perf:` | none |
+
+Any `ci:` or `fix:` commit releases, scoped (`fix(agent-guardrails): ...`) or
+not, so a PR from the setup job (`ci: add agent-guardrails required check`)
+does. The job uses only the run's `GITHUB_TOKEN`
+with `contents: write`, never deletes or moves a tag, and fails loudly if the
+next tag already exists. `tests/test_release.py` pins this.
+
+After a release that changes the guardrail, bump the ref in the setup repo's
+config if it changed, and dispatch its "Agent Coding Setup" workflow so the
+ruleset points at the new tag. The `v*` tag ruleset still blocks updating or
+deleting any release tag.
