@@ -82,10 +82,11 @@ jobs:
           # Files that control the guardrails themselves. Normally gated natively by
           # the ruleset's required reviewers; checked here only as a backstop.
           GATE = ["CODEOWNERS", "**/CODEOWNERS", "**agent-guardrails*", "**claude-guardrails*",
-                  "**claude-run*", "**automerge*", "**auto-merge*", "**ready-merge*",
+                  "**claude-run*", "**auto*merge*", "**ready-merge*",
                   "**agent-coding*", "**agent-gh*", "**open-agent-pr*", "**ruleset*",
-                  "**branch-protection*", "**branch_protection*", ".semgrep/**",
-                  "**.semgrepignore", "**semgrep_gate*", "tests/canaries/**"]
+                  "**branch*protection*", ".semgrep/**",
+                  "**.semgrepignore", "**semgrep_gate*", "tests/canaries/**",
+                  "**dump*live*", "**live*db*"]
           TESTS = ["tests/**", "test/**", "**/tests/**", "**/test/**", "**/__tests__/**",
                    "**test_*.py", "**_test.py", "**.test.ts", "**.test.tsx", "**.test.js",
                    "**.test.jsx", "**.spec.ts", "**.spec.tsx", "**.spec.js", "**.spec.jsx",
