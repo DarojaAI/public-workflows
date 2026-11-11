@@ -141,8 +141,18 @@ merged "Merge pull request #N" count, not the merge commit. Rules are in
 Any `ci:` or `fix:` commit releases, scoped (`fix(agent-guardrails): ...`) or
 not, so a PR from the setup job (`ci: add agent-guardrails required check`)
 does. The job uses only the run's `GITHUB_TOKEN`
-with `contents: write`, never deletes or moves a tag, and fails loudly if the
+with `contents: write` (on the job only), installs from a lockfile
+(`npm ci --ignore-scripts`), never deletes or moves a tag, and fails loudly if the
 next tag already exists. `tests/test_release.py` pins this.
+
+If a run fails after the tag is pushed but before the GitHub release exists
+(the tag is there, the release page is missing), re-running the job will not
+fix it: the tag already exists, so the guard fails on purpose. Create the
+release by hand and leave the tag alone:
+
+```bash
+gh release create vX.Y.Z --verify-tag --generate-notes --title vX.Y.Z
+```
 
 After a release that changes the guardrail, bump the ref in the setup repo's
 config if it changed, and dispatch its "Agent Coding Setup" workflow so the

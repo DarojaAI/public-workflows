@@ -40,10 +40,10 @@ class ReleaseWorkflowTests(unittest.TestCase):
         self.assertEqual(set(on), {"push", "workflow_dispatch"})
         self.assertEqual(on["push"], {"branches": ["main"]})
 
-    def test_token_is_contents_write_only(self):
-        self.assertEqual(self.wf["permissions"], {"contents": "write"})
+    def test_workflow_default_is_no_permissions_and_job_gets_contents_write_only(self):
+        self.assertEqual(self.wf["permissions"], {})
         for name, job in self.wf["jobs"].items():
-            self.assertNotIn("permissions", job, f"job {name} must not widen permissions")
+            self.assertEqual(job.get("permissions"), {"contents": "write"}, name)
 
     def test_only_github_token_is_used(self):
         refs = set(re.findall(r"secrets\.([A-Za-z0-9_]+)", self.text))
@@ -60,13 +60,40 @@ class ReleaseWorkflowTests(unittest.TestCase):
         for u in uses:
             self.assertRegex(u, r"^[\w.-]+/[\w./-]+@[0-9a-f]{40}$", u)
 
-    def test_npm_packages_are_pinned_to_exact_versions(self):
-        run = "\n".join(s.get("run", "") for s in all_steps(self.wf))
-        pkgs = re.findall(r"(?<![\w/.-])((?:@[\w.-]+/)?[\w.-]+@[^\s\\]+)", run)
-        pkgs = [p for p in pkgs if "semantic-release" in p or "conventional-changelog" in p]
-        self.assertGreaterEqual(len(pkgs), 5, pkgs)
-        for p in pkgs:
-            self.assertRegex(p, r"@\d+\.\d+\.\d+$", p)
+    def test_install_is_locked_with_npm_ci_and_scripts_off(self):
+        runs = [s.get("run", "") for s in all_steps(self.wf)]
+        installs = [r for r in runs if re.search(r"\bnpm\s+(ci|install|i)\b", r)]
+        self.assertEqual(len(installs), 1, installs)
+        self.assertRegex(installs[0], r"\bnpm ci\b")
+        self.assertIn("--ignore-scripts", installs[0])
+        for bad in ("--no-save", "--no-package-lock", "npm install", "npm i "):
+            self.assertNotIn(bad, installs[0], bad)
+        self.assertIsNone(re.search(r"\bnpx\b", self.text), "no npx: it can fetch unpinned code")
+
+    def test_lockfile_pins_the_five_packages_exactly(self):
+        pkg = json.loads((ROOT / "package.json").read_text())
+        lock = json.loads((ROOT / "package-lock.json").read_text())
+        self.assertGreaterEqual(lock["lockfileVersion"], 3)
+        deps = pkg["devDependencies"]
+        self.assertEqual(set(deps), {"semantic-release", "@semantic-release/commit-analyzer",
+                                     "@semantic-release/release-notes-generator",
+                                     "@semantic-release/github",
+                                     "conventional-changelog-conventionalcommits"})
+        self.assertFalse(pkg.get("dependencies"))
+        for name, ver in deps.items():
+            self.assertRegex(ver, r"^\d+\.\d+\.\d+$", name)
+            self.assertEqual(lock["packages"][f"node_modules/{name}"]["version"], ver, name)
+            self.assertEqual(lock["packages"][""]["devDependencies"][name], ver, name)
+        for path, meta in lock["packages"].items():
+            # Entries bundled inside another package's tarball (npm's own
+            # dependencies) ship with that parent, which is checked here.
+            if path and not meta.get("inBundle"):
+                self.assertRegex(meta["resolved"], r"^https://registry\.npmjs\.org/", path)
+                self.assertTrue(meta.get("integrity", "").startswith("sha"), path)
+
+    def test_dry_run_guard_fails_closed(self):
+        self.assertIn("no relevant changes, so no new version is released", self.text)
+        self.assertRegex(self.text, r"Failing closed")
 
     def test_releases_cannot_race_or_be_cancelled(self):
         self.assertEqual(self.wf["concurrency"], {"group": "release", "cancel-in-progress": False})
