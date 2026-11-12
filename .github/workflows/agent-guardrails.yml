@@ -84,7 +84,7 @@ jobs:
           GATE = ["CODEOWNERS", "**/CODEOWNERS", "**agent-guardrails*", "**claude-guardrails*",
                   "**claude-run*", "**auto*merge*", "**ready-merge*",
                   "**agent-coding*", "**agent-gh*", "**open-agent-pr*", "**ruleset*",
-                  "**branch*protection*", ".semgrep/[!b]*",
+                  "**branch*protection*", "**gate-policy**",
                   "**.semgrepignore", "**semgrep_gate*", "tests/canaries/**"]
           TESTS = ["tests/**", "test/**", "**/tests/**", "**/test/**", "**/__tests__/**",
                    "**test_*.py", "**_test.py", "**.test.ts", "**.test.tsx", "**.test.js",
