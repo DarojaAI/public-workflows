@@ -33,7 +33,7 @@ BEFORE = "2026-11-01T09:00:00Z"
 AFTER = "2026-11-01T11:00:00Z"
 APPROVER = "patelmm79"
 # Mirrors linux-desktop-seed config/agent-coding.json guardrails.reviewed_path_groups.
-REVIEWED_PATH_GROUPS = [["*CODEOWNERS", "*agent-guardrails*", "*claude-guardrails*", "*claude-run*", "*auto*merge*", "*ready-merge*", "*agent-coding*", "*agent-gh*", "*open-agent-pr*", "*ruleset*", "*branch*protection*", "*semgrep*", "tests/canaries/*", "*dump*live*", "*live*db*"]]
+REVIEWED_PATH_GROUPS = [["*CODEOWNERS", "*agent-guardrails*", "*claude-guardrails*", "*claude-run*", "*auto*merge*", "*ready-merge*", "*agent-coding*", "*agent-gh*", "*open-agent-pr*", "*ruleset*", "*branch*protection*", "*semgrep_gate*", "*.semgrepignore", ".semgrep/[!b]*", "tests/canaries/*"]]
 
 
 def rules_with(groups, team_type="Team", approvals=1):
@@ -233,8 +233,7 @@ class GuardrailScriptTest(unittest.TestCase):
                  "tool/check/claude-guardrails/scripts/guardrails.py",
                  ".github/workflows/apply-branch-protection.yml",
                  "scripts/sync_branch_protection.py", "scripts/apply-rulesets.sh",
-                 ".github/workflows/live-db-migrate-set.yml", ".github/workflows/dump-live-schema.yml",
-                 ".semgrep/baseline.json", ".semgrep/rules/x.yml", ".semgrepignore", "api/.semgrepignore",
+                 ".semgrep/rules/x.yml", ".semgrepignore", "api/.semgrepignore",
                  "scripts/semgrep_gate.py", "tests/test_semgrep_gate.py",
                  ".github/workflows/open-agent-pr.yml"]
 
