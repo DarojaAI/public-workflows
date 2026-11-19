@@ -45,8 +45,8 @@ branch `agent/**`, or author `darojaai-agents[bot]`). Other PRs pass at once.
 
 - **Gate files** are approved natively: since v2.0.0 the org ruleset requires an
   approving review from the `guardrail-approvers` team on the guarded paths
-  (GitHub's required-reviewer rule, configured in DarojaAI/linux-desktop-seed
-  `config/agent-coding.json`), so approving the PR is the whole approval. **G1**
+  (GitHub's required-reviewer rule, configured in the org's setup
+  repository), so approving the PR is the whole approval. **G1**
   here is only a backstop: it reads the branch's live rules and fails a gate
   file that no required-reviewer pattern covers (gitignore matching via
   `git check-ignore`).
@@ -65,9 +65,8 @@ run. Approve, then re-run the failed check from that link.
 The comment changes to "approved" or "passed" on later runs.
 
 The file is generated, not hand-edited. Its source is the agent-coding
-template in DarojaAI's setup repository (`linux-desktop-seed`,
-`config/agent-coding/agent-guardrails.yml`), rendered with the approver list
-from that repo's `config/agent-coding.json`. The org setup checks that the
+template in the org's setup repository, rendered with the approver list
+from that repository's configuration. The org setup checks that the
 release the ruleset points at holds exactly that rendering, and refuses to
 point the ruleset at a release that doesn't. To change the guardrail, change
 the template there first. Then land the same rendered file here and cut a
@@ -170,15 +169,13 @@ Releases are semver tags `vMAJOR.MINOR.PATCH`, cut automatically on merge to
   `.github/workflows/agent-guardrails.yml` at `refs/tags/v1.0.0`; GitHub's
   rulesets REST API describes the workflow `ref` as "The ref (branch or tag)
   of the workflow file to use". Merging to `main` changes nothing for
-  consumers until a new tag is cut and the setup repo's
-  `config/agent-coding.json` (`guardrails.workflow_homes.DarojaAI.ref`) points
-  at it.
+  consumers until a new tag is cut and the setup repository's configuration
+  points at it.
 - **Other consumers** (`uses:` of a reusable workflow or action added here
   later) pin a tag, or a full commit SHA for the strongest pin.
 - **Never move or delete a released tag.** Fix forward with a new version.
-  When the guardrail changes, cut a new tag and bump
-  `guardrails.workflow_homes.DarojaAI.ref` in the setup repo; the setup
-  fails with DRIFT (and leaves the ruleset as it is) until both are done.
+  When the guardrail changes, cut a new tag and bump the pinned tag in the
+  setup repository's configuration; the setup fails with DRIFT (and leaves the ruleset as it is) until both are done.
   The owner should protect `v*` tags with a tag ruleset (block update and
   deletion, restrict creation to maintainers) and can turn on immutable
   releases.

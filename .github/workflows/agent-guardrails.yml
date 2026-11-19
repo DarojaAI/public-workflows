@@ -1,16 +1,11 @@
-# agent-guardrails.yml — required check for repos with agent-coding=true
-# (DarojaAI/linux-desktop-seed#3362). TEMPLATE: the source of truth lives in
-# DarojaAI/linux-desktop-seed config/agent-coding/agent-guardrails.yml. Each
-# org's workflow home (config/agent-coding.json guardrails.workflow_homes;
-# default ORG/.github) carries it rendered, and the org ruleset "agent-coding:
-# default branch" references it there as a required workflow. A home pinned
-# to a release tag (DarojaAI/public-workflows) is released by a human; the
-# setup (scripts/maintenance/agent-coding-org-setup.sh) checks the tag holds
-# exactly this rendering. APPROVERS is rendered from guardrails.approvers
-# (the placeholder below is never committed as is).
+# agent-guardrails.yml — required check for repos with agent-coding=true.
+# Generated from a template in the org's setup repository and rendered with
+# its approver list; do not hand-edit. The org ruleset "agent-coding: default
+# branch" references this file as a required workflow at a release tag the
+# owner chooses; merging here changes nothing until that pin is bumped.
 #
-# Port of DarojaAI/whippingboy claude-guardrails (infra-actions
-# tool/check/claude-guardrails), G2 only: no deleted tests or new skips.
+# Ported from an earlier guardrails check, G2 only: no deleted tests
+# or new skips.
 # Self-contained on purpose: it runs in every org listed in the config, and a
 # private reusable workflow in another org is not callable.
 #
