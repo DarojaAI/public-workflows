@@ -145,8 +145,7 @@ Releases are semver tags `vMAJOR.MINOR.PATCH`, cut automatically on merge to
   later) pin a tag, or a full commit SHA for the strongest pin.
 - **Never move or delete a released tag.** Fix forward with a new version.
   When the guardrail changes, cut a new tag and bump the pinned tag in the
-  setup repository's configuration; the setup
-  fails with DRIFT (and leaves the ruleset as it is) until both are done.
+  setup repository's configuration; the setup fails with DRIFT (and leaves the ruleset as it is) until both are done.
   The owner should protect `v*` tags with a tag ruleset (block update and
   deletion, restrict creation to maintainers) and can turn on immutable
   releases.

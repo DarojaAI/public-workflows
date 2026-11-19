@@ -1,8 +1,8 @@
 # agent-guardrails.yml — required check for repos with agent-coding=true.
 # Generated from a template in the org's setup repository and rendered with
 # its approver list; do not hand-edit. The org ruleset "agent-coding: default
-# branch" references this file at a release tag as a required workflow, and a
-# release is cut by a human.
+# branch" references this file as a required workflow at a release tag the
+# owner chooses; merging here changes nothing until that pin is bumped.
 #
 # Ported from an earlier guardrails check, G2 only: no deleted tests
 # or new skips.
