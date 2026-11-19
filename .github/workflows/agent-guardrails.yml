@@ -9,8 +9,8 @@
 # exactly this rendering. APPROVERS is rendered from guardrails.approvers
 # (the placeholder below is never committed as is).
 #
-# Port of DarojaAI/whippingboy claude-guardrails (infra-actions
-# tool/check/claude-guardrails), G2 only: no deleted tests or new skips.
+# Ported from an earlier guardrails check, G2 only: no deleted tests
+# or new skips.
 # Self-contained on purpose: it runs in every org listed in the config, and a
 # private reusable workflow in another org is not callable.
 #
