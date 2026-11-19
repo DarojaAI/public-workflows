@@ -19,10 +19,9 @@ on:
         type: string
         default: ""
       baseline_json:
-        description: "JSON string of the baseline protection to compare against. If empty, uses the built-in DarojaAI baseline. Only the keys listed are checked; unknown keys, an empty object and non-object JSON fail the audit. Note: false values for allow_* and block_creations match GitHub's defaults, so a baseline listing only those passes on any classic-protected branch."
-        required: false
+        description: "JSON string of the baseline protection to compare against (required; there is no built-in baseline). Only the keys listed are checked; unknown keys, an empty object and non-object JSON fail the audit. Note: false values for allow_* and block_creations match GitHub's defaults, so a baseline listing only those passes on any classic-protected branch."
+        required: true
         type: string
-        default: ""
       app-client-id:
         description: >
           Optional. Client ID of the GitHub App that mints the token for the
@@ -220,22 +219,6 @@ jobs:
           current_raw = os.environ["CURRENT"]
           baseline_input = os.environ.get("BASELINE_INPUT", "").strip()
 
-          # Default baseline (override with the baseline_json input)
-          default_baseline = {
-              "enforce_admins": True,
-              "required_linear_history": True,
-              "allow_force_pushes": False,
-              "allow_deletions": False,
-              "block_creations": False,
-              "required_conversation_resolution": True,
-              "required_pull_request_reviews": {
-                  "required_approving_review_count": 1,
-                  "dismiss_stale_reviews": True,
-                  "require_code_owner_reviews": True,
-                  "require_last_push_approval": False,
-              },
-          }
-
           BOOL_KEYS = (
               "enforce_admins",
               "required_linear_history",
@@ -255,13 +238,12 @@ jobs:
               print(f"::error::{msg}")
               sys.exit(1)
 
-          if baseline_input:
-              try:
-                  baseline = json.loads(baseline_input)
-              except json.JSONDecodeError as e:
-                  fail(f"baseline_json is not valid JSON: {e}")
-          else:
-              baseline = default_baseline
+          if not baseline_input:
+              fail("baseline_json is required: pass the protection this branch should have (there is no built-in baseline).")
+          try:
+              baseline = json.loads(baseline_input)
+          except json.JSONDecodeError as e:
+              fail(f"baseline_json is not valid JSON: {e}")
 
           # Only keys present in the baseline are audited. Validate up front so a
           # typo or an empty baseline can never silently pass.

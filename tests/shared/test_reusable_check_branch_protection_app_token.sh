@@ -24,6 +24,8 @@ REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 WFDIR="${REPO_ROOT}/.github/workflows"
 BP="${WFDIR}/reusable-check-branch-protection.yml"
 MINT_SHA="64ab729a6294000f5aa4a4bc0b73d1f32bc45510"
+# Fixture baseline for these tests only (the workflow has no built-in baseline).
+TEST_BASE='{"enforce_admins":true,"required_linear_history":true,"allow_force_pushes":false,"allow_deletions":false,"block_creations":false,"required_conversation_resolution":true,"required_pull_request_reviews":{"required_approving_review_count":2,"dismiss_stale_reviews":true,"require_code_owner_reviews":false,"require_last_push_approval":true}}'
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 
@@ -275,7 +277,7 @@ run_audit() { # mode ; sets $WORK/audit.out
   st=$(sed -n 's/^status=//p' "$WORK/step.out"); cur=$(sed -n 's/^current=//p' "$WORK/step.out")
   : > "$WORK/audit.out"
   env -i PATH="$PATH" REPO="DarojaAI/example-repo" BRANCH=trunk STATUS="$st" CURRENT="$cur" \
-    BASELINE_INPUT="" GITHUB_OUTPUT="$WORK/audit.out" bash "$WORK/bp.audit.sh" >"$WORK/audit.log" 2>&1
+    BASELINE_INPUT="$TEST_BASE" GITHUB_OUTPUT="$WORK/audit.out" bash "$WORK/bp.audit.sh" >"$WORK/audit.log" 2>&1
 }
 if run_audit unprotected && grep -qx "protected=false" "$WORK/audit.out" \
    && grep -qx "readable=true" "$WORK/audit.out" && grep -qx "http_status=404" "$WORK/audit.out"; then
@@ -286,7 +288,7 @@ if run_audit ok && grep -qx "readable=true" "$WORK/audit.out" && grep -qx "http_
 else bad "bp App: 200 audit outputs"; fi
 # --- audit: baseline keys ---
 DEF7='enforce_admins required_linear_history allow_force_pushes allow_deletions block_creations required_conversation_resolution required_pull_request_reviews'
-FULL_PROT='{"enforce_admins":{"enabled":true},"required_linear_history":{"enabled":true},"allow_force_pushes":{"enabled":false},"allow_deletions":{"enabled":false},"block_creations":{"enabled":false},"required_conversation_resolution":{"enabled":true},"required_pull_request_reviews":{"required_approving_review_count":1,"dismiss_stale_reviews":true,"require_code_owner_reviews":true}}'
+FULL_PROT='{"enforce_admins":{"enabled":true},"required_linear_history":{"enabled":true},"allow_force_pushes":{"enabled":false},"allow_deletions":{"enabled":false},"block_creations":{"enabled":false},"required_conversation_resolution":{"enabled":true},"required_pull_request_reviews":{"required_approving_review_count":2,"dismiss_stale_reviews":true,"require_code_owner_reviews":false,"require_last_push_approval":true}}'
 NOREV_PROT='{"allow_deletions":{"enabled":false},"allow_force_pushes":{"enabled":false},"block_creations":{"enabled":false},"enforce_admins":{"enabled":true},"required_conversation_resolution":{"enabled":true},"required_linear_history":{"enabled":true}}'
 NOREV_BASE='{"enforce_admins":true,"required_linear_history":true,"allow_force_pushes":false,"allow_deletions":false,"block_creations":false,"required_conversation_resolution":true}'
 # audit_with <status> <current json> <baseline json>; result in $WORK/audit.out / audit.log
@@ -300,13 +302,24 @@ import json,sys
 a=json.loads([l for l in open('$WORK/audit.out') if l.startswith('audit_json=')][0][len('audit_json='):])
 print(' '.join(a.get('checks',{}).keys()))"; }
 
-if audit_with 200 "$FULL_PROT" "" && grep -qx "protected=true" "$WORK/audit.out" && grep -qxF "missing=[]" "$WORK/audit.out" \
-   && [ "$(checks_keys)" = "$DEF7" ]; then ok "audit: default baseline checks the same 7 keys, fully protected"; else bad "audit: default baseline"; fi
-if audit_with 200 '{"enforce_admins":{"enabled":true}}' "" && grep -qx "protected=false" "$WORK/audit.out" \
+if audit_with 200 "$FULL_PROT" "$TEST_BASE" && grep -qx "protected=true" "$WORK/audit.out" && grep -qxF "missing=[]" "$WORK/audit.out" \
+   && [ "$(checks_keys)" = "$DEF7" ]; then ok "audit: full baseline checks its 7 keys, fully protected"; else bad "audit: full baseline"; fi
+if audit_with 200 '{"enforce_admins":{"enabled":true}}' "$TEST_BASE" && grep -qx "protected=false" "$WORK/audit.out" \
    && grep -qxF 'missing=["required_linear_history", "allow_force_pushes", "allow_deletions", "block_creations", "required_conversation_resolution", "required_pull_request_reviews"]' "$WORK/audit.out"; then
-  ok "audit: default baseline unchanged on sparse protection (missing keys and order)"; else bad "audit: default sparse"; fi
-if audit_with 200 "${FULL_PROT/\"required_approving_review_count\":1/\"required_approving_review_count\":0}" "" && grep -qxF 'missing=["required_pull_request_reviews"]' "$WORK/audit.out"; then
-  ok "audit: default baseline requires >=1 approving review"; else bad "audit: default review count"; fi
+  ok "audit: sparse protection -> missing keys in baseline order"; else bad "audit: sparse protection"; fi
+if audit_with 200 "${FULL_PROT/\"required_approving_review_count\":2/\"required_approving_review_count\":1}" "$TEST_BASE" && grep -qxF 'missing=["required_pull_request_reviews"]' "$WORK/audit.out"; then
+  ok "audit: review count below baseline -> missing"; else bad "audit: review count below baseline"; fi
+# No built-in baseline: empty input is an error on every path, never a pass.
+for st in 200 404; do
+  if audit_with "$st" "$FULL_PROT" ""; then bad "audit: empty baseline accepted (status $st)"
+  elif grep -q "::error::baseline_json is required" "$WORK/audit.log" && ! grep -q "^protected=" "$WORK/audit.out"; then ok "audit: empty baseline -> ::error:: (status $st)"
+  else bad "audit: empty baseline wrong failure (status $st)"; fi
+done
+assert "workflow declares baseline_json required with no default" "python3 -c \"
+import yaml,sys
+i=yaml.safe_load(open('$BP'))[True]['workflow_call']['inputs']['baseline_json']
+sys.exit(0 if i['required'] is True and 'default' not in i else 1)\""
+assert "workflow holds no built-in baseline" "! grep -q 'default_baseline' '$BP'"
 
 if audit_with 200 "$NOREV_PROT" "$NOREV_BASE" && grep -qx "protected=true" "$WORK/audit.out" && grep -qxF "missing=[]" "$WORK/audit.out" \
    && [ "$(checks_keys)" = "enforce_admins required_linear_history allow_force_pushes allow_deletions block_creations required_conversation_resolution" ]; then
@@ -351,7 +364,7 @@ tok_audit() { # mode [protection json]
   run_step "$WORK/bp.read.sh" "$1" false ${2:+FAKE_PROT="$2"} || return 1
   local st cur
   st=$(sed -n 's/^status=//p' "$WORK/step.out"); cur=$(sed -n 's/^current=//p' "$WORK/step.out")
-  audit_with "$st" "$cur" ""
+  audit_with "$st" "$cur" "$TEST_BASE"
 }
 if tok_audit forbidden && grep -qx "readable=false" "$WORK/audit.out" && grep -qx "http_status=403" "$WORK/audit.out" \
    && grep -qx "protected=false" "$WORK/audit.out" && grep -qxF "missing=[]" "$WORK/audit.out"; then
@@ -363,7 +376,7 @@ if tok_audit unprotected && grep -qx "readable=true" "$WORK/audit.out" && grep -
 
 # github-token path, other statuses: cannot read, never "unprotected", no step failure
 for st in 500 000 502; do
-  if audit_with "$st" 'upstream error' "" && grep -qx "readable=false" "$WORK/audit.out" && grep -qx "protected=false" "$WORK/audit.out" \
+  if audit_with "$st" 'upstream error' "$TEST_BASE" && grep -qx "readable=false" "$WORK/audit.out" && grep -qx "protected=false" "$WORK/audit.out" \
      && grep -qx "http_status=$((10#$st))" "$WORK/audit.out" && grep -qxF "missing=[]" "$WORK/audit.out" && ! grep -q "NO branch protection" "$WORK/audit.out"; then
     ok "audit: status $st -> readable=false, http_status set, not reported unprotected"; else bad "audit: status $st"; fi
 done
