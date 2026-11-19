@@ -98,6 +98,39 @@ guardrail itself pins `actions/checkout` by SHA too).
 Run the tests locally with `pip install pyyaml==6.0.2`, then
 `python3 -m unittest discover -s tests -v` (needs git, jq and bash).
 
+## Shared reusable workflows and actions
+
+Generic CI building blocks that public DarojaAI repos call. They used to live in
+a private DarojaAI repo, which public repos cannot call. The private copies
+now forward here, so private callers keep working.
+
+| Path | What it does |
+| --- | --- |
+| `.github/workflows/reusable-pre-commit.yml` | Runs the repo's pre-commit hooks; optional App token to install private Python deps |
+| `.github/workflows/reusable-terraform-stub-plan.yml` | `terraform plan` against stubbed providers, failing on any plan error |
+| `.github/workflows/reusable-enable-pr-automerge.yml` | Enables auto-merge on matching PRs (GITHUB_TOKEN or an App token) |
+| `.github/workflows/reusable-check-branch-protection.yml` | Compares a branch's live protection with a baseline (github-token or an App token) |
+| `actions/check/eslint` | ESLint |
+| `actions/check/typescript` | `tsc --noEmit` |
+| `actions/check/vitest` | Vitest unit tests |
+| `actions/check/npm-audit` | `npm audit` at a severity threshold |
+
+```yaml
+jobs:
+  pre-commit:
+    uses: DarojaAI/public-workflows/.github/workflows/reusable-pre-commit.yml@vX.Y.Z
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: DarojaAI/public-workflows/actions/check/eslint@vX.Y.Z
+```
+
+All credentials come from the caller at run time (`secrets:` / `with:`). Jobs run on
+`inputs.runner`, else the caller's `vars.RUNNER_POOL`, else `ubicloud-standard-4`.
+Each workflow's contract is pinned by a test in `tests/shared/`, run by
+`tests/test_shared_workflows.py`. Pin a tag as described below.
+
 ## Releases and pinning
 
 Releases are semver tags `vMAJOR.MINOR.PATCH`, cut automatically on merge to

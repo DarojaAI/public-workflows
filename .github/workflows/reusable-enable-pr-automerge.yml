@@ -1,0 +1,256 @@
+name: Reusable PR Auto-merge (GitHub-native)
+
+# Wraps `gh pr merge --auto` so consumer repos can opt a PR (or all PRs on
+# a branch) into GitHub's native auto-merge queue. The auto-merge flag is
+# set; the actual merge is performed by GitHub once all required status
+# checks (as configured in branch protection) pass.
+#
+# This is the GitHub-native pattern: human/cla/bot still author the merge,
+# the timer shows up in the PR UI, branch-protection required checks
+# still gate the merge. It is *not* a direct API merge.
+#
+# This complements (does not replace) the existing
+# `reusable-pr-automerge.yml`, which performs a direct API merge with
+# retry/cleanup logic. Use this one when you want GitHub's queue to do
+# the merge; use the other when you need a direct synchronous merge.
+
+on:
+  workflow_call:
+    inputs:
+      runner:
+        description: 'Runner label for the jobs in this workflow. Empty (the default) uses vars.RUNNER_POOL, resolved in the calling repo or org, then falls back to ubicloud-standard-4 so a caller without the variable never lands on a GitHub-hosted runner.'
+        required: false
+        type: string
+        default: ''
+      branches:
+        description: >
+          Comma-separated list of target branches the auto-merge trigger
+          applies to. Default: 'main'.
+        required: false
+        type: string
+        default: 'main'
+      trigger-events:
+        description: >
+          Regex of events to act on. Default .* matches all events. Pass an
+          explicit regex to scope back.
+        required: false
+        type: string
+        default: '.*'
+      require-label:
+        description: >
+          If non-empty, the PR must have this label to be auto-merged.
+          Leave empty to auto-merge every non-draft PR (rely on branch
+          protection to gate which PRs are actually eligible).
+        required: false
+        type: string
+        default: ''
+      skip-draft:
+        description: >
+          If true, do not enable auto-merge on draft PRs. Default: true.
+        required: false
+        type: boolean
+        default: true
+      merge-method:
+        description: >
+          Merge method passed to `gh pr merge --auto`. One of:
+          merge, squash, rebase. Default: squash.
+        required: false
+        type: string
+        default: 'squash'
+      delete-branch:
+        description: >
+          If true, delete the head branch after a successful merge.
+          Default: true. (Note: this is enforced via the repo's
+          delete_branch_on_merge setting, not by this workflow.)
+        required: false
+        type: boolean
+        default: true
+      app-client-id:
+        description: >
+          Optional. Client ID of the GitHub App that mints the merge token.
+          It is not a secret. Set together with the app-private-key secret.
+          Leave both empty to use GITHUB_TOKEN.
+        required: false
+        type: string
+        default: ''
+    secrets:
+      app-private-key:
+        description: >
+          Optional. Private key of the GitHub App named by app-client-id.
+          Set together with app-client-id. Leave both empty to use GITHUB_TOKEN.
+        required: false
+
+permissions:
+  pull-requests: write
+  contents: write
+
+jobs:
+  enable:
+    name: Enable auto-merge
+    runs-on: ${{ inputs.runner || vars.RUNNER_POOL || 'ubicloud-standard-4' }}
+    steps:
+      - name: Validate inputs
+        env:
+          MERGE_METHOD: ${{ inputs.merge-method }}
+        run: |
+          case "$MERGE_METHOD" in
+            merge|squash|rebase) ;;
+            *)
+              echo "::error::merge-method must be one of: merge, squash, rebase (got: $MERGE_METHOD)"
+              exit 1
+              ;;
+          esac
+
+      - name: Validate App token inputs
+        id: app-inputs
+        env:
+          APP_CLIENT_ID: ${{ inputs.app-client-id }}
+          APP_PRIVATE_KEY: ${{ secrets.app-private-key }}
+        run: |
+          set -euo pipefail
+          # Presence checks only. The key is never printed.
+          if [ -n "$APP_CLIENT_ID" ] && [ -z "$APP_PRIVATE_KEY" ]; then
+            echo "::error::app-client-id is set but the app-private-key secret is empty. Set both, or neither to use GITHUB_TOKEN."
+            exit 1
+          fi
+          if [ -z "$APP_CLIENT_ID" ] && [ -n "$APP_PRIVATE_KEY" ]; then
+            echo "::error::app-private-key is set but app-client-id is empty. Set both, or neither to use GITHUB_TOKEN."
+            exit 1
+          fi
+          if [ -n "$APP_CLIENT_ID" ]; then
+            echo "use-app=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "use-app=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::No App credentials set; using GITHUB_TOKEN."
+          fi
+          # Repository name only (the App is limited to this repo).
+          echo "repo-name=${GITHUB_REPOSITORY#*/}" >> "$GITHUB_OUTPUT"
+
+      - name: Mint GitHub App token
+        id: app-token
+        if: steps.app-inputs.outputs.use-app == 'true'
+        # SHA must match the pin used by dev-nexus (see PR body).
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        with:
+          client-id: ${{ inputs.app-client-id }}
+          private-key: ${{ secrets.app-private-key }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ steps.app-inputs.outputs.repo-name }}
+          permission-contents: write
+          permission-pull-requests: write
+
+      - name: Build trigger condition
+        id: condition
+        env:
+          BRANCHES: ${{ inputs.branches }}
+          EVENTS: ${{ inputs.trigger-events }}
+          SKIP_DRAFT: ${{ inputs.skip-draft }}
+          REQUIRE_LABEL: ${{ inputs.require-label }}
+        run: |
+          # Convert CSV to GitHub Actions expression lists.
+          branch_list() { echo "$1" | tr ',' '\n' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | paste -sd '|' -; }
+          BRANCH_REGEX=$(branch_list "$BRANCHES")
+          EVENT_REGEX=$(branch_list "$EVENTS")
+          {
+            echo "branch_regex=$BRANCH_REGEX"
+            echo "event_regex=$EVENT_REGEX"
+            echo "skip_draft=$SKIP_DRAFT"
+            echo "require_label=$REQUIRE_LABEL"
+          } >> "$GITHUB_OUTPUT"
+          echo "branches='$BRANCHES' events='$EVENTS' skip_draft='$SKIP_DRAFT' label='$REQUIRE_LABEL'"
+
+      - name: Enable auto-merge
+        env:
+          # Minted App token when app-client-id and app-private-key are set; GITHUB_TOKEN otherwise.
+          GH_TOKEN: ${{ steps.app-token.outputs.token || secrets.GITHUB_TOKEN }}
+          PR_URL: ${{ github.event.pull_request.html_url }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_DRAFT: ${{ github.event.pull_request.draft }}
+          PR_LABELS: ${{ toJSON(github.event.pull_request.labels) }}
+          REF_NAME: ${{ github.event.pull_request.base.ref }}
+          ACTION_NAME: ${{ github.event_name }}
+          ACTION: ${{ github.event.action }}
+          MERGE_METHOD: ${{ inputs.merge-method }}
+          BRANCH_REGEX: ${{ steps.condition.outputs.branch_regex }}
+          EVENT_REGEX: ${{ steps.condition.outputs.event_regex }}
+          SKIP_DRAFT: ${{ steps.condition.outputs.skip_draft }}
+          REQUIRE_LABEL: ${{ steps.condition.outputs.require_label }}
+        run: |
+          set -euo pipefail
+
+          # 1. Branch gate
+          if ! [[ "$REF_NAME" =~ ^($BRANCH_REGEX)$ ]]; then
+            echo "::notice::Skipping: base ref '$REF_NAME' not in branch list ($BRANCH_REGEX)"
+            exit 0
+          fi
+
+          # 2. Event gate
+          if ! [[ "$ACTION" =~ ^($EVENT_REGEX)$ ]]; then
+            echo "::notice::Skipping: event '$ACTION' not in event list ($EVENT_REGEX)"
+            exit 0
+          fi
+
+          # 3. Draft gate
+          if [ "$SKIP_DRAFT" = "true" ] && [ "$PR_DRAFT" = "true" ]; then
+            echo "::notice::Skipping: PR is a draft"
+            exit 0
+          fi
+
+          # 4. Label gate (if configured)
+          if [ -n "$REQUIRE_LABEL" ]; then
+            if echo "$PR_LABELS" | grep -q "\"name\":\"$REQUIRE_LABEL\""; then
+              echo "::notice::PR has required label '$REQUIRE_LABEL'"
+            else
+              echo "::notice::Skipping: PR does not have required label '$REQUIRE_LABEL'"
+              exit 0
+            fi
+          fi
+
+          # 5. Enable auto-merge. `gh pr merge --auto` flips the auto-merge
+          #    flag on the PR; GitHub performs the merge once all required
+          #    status checks (configured via branch protection) pass.
+          #
+          # 2026-08-07 FIX: capture stderr and exit non-zero if the gh
+          # command fails. The previous `|| echo "::warning::... Continuing."`
+          # swallowed the actual error message and reported the step as
+          # SUCCESS, leaving callers with no signal why auto-merge did
+          # not engage (observed on PR DarojaAI/rag_research_tool#1326,
+          # where the run completed in 2.2s with no error logged).
+          echo "Enabling auto-merge on PR #$PR_NUMBER (method=$MERGE_METHOD)"
+          # 2026-08-17 FIX: even when the caller opts into `skip-draft: false`
+          # (intending auto-merge on drafts), GitHub's GraphQL API rejects
+          # `gh pr merge --auto` on draft PRs with
+          # `Pull request is a draft (enablePullRequestAutoMerge)`. The
+          # caller side has the GitHub-provided draft flag available via
+          # `$PR_DRAFT` from the workflow context, but the reusable was
+          # relying on step-3's gate alone to enforce that. If the caller
+          # passes `skip-draft: false` (intentional opt-in to draft
+          # auto-merge), step 3 falls through and step 5 attempts the
+          # GraphQL call, which 422-misfires as a CI failure that looks
+          # identical to an infra problem.
+          #
+          # Defensive check here: re-confirm draft state directly with the
+          # GitHub API before attempting the merge. If the PR is still in
+          # draft, exit 0 with a notice (this matches the step-3 gate's
+          # contract). `gh pr view` is cheap and idempotent. See
+          # the original issue for the consumer-side reproducer.
+          if is_draft=$(gh pr view "$PR_NUMBER" --repo "${{ github.repository }}" --json isDraft -q '.isDraft' 2>/dev/null); then
+            if [ "$is_draft" = "true" ]; then
+              echo "::notice::PR #$PR_NUMBER transitioned to draft since trigger fired; skipping auto-merge (GraphQL rejects drafts)."
+              exit 0
+            fi
+          else
+            echo "::warning::gh pr view --json isDraft failed; proceeding with auto-merge attempt based on event-time draft flag."
+          fi
+          if ! gh_output=$(gh pr merge "$PR_NUMBER" \
+              --repo "${{ github.repository }}" \
+              --auto \
+              --"$MERGE_METHOD" 2>&1); then
+            echo "::warning::gh pr merge --auto failed for PR #$PR_NUMBER:"
+            printf '  %s\n' "${gh_output//$'\n'/$'\n  '}"
+            echo "::error::Auto-merge not enabled. See warning above for the actual gh error."
+            exit 1
+          fi
+          printf '  %s\n' "${gh_output//$'\n'/$'\n  '}"
+
+          echo "✓ Auto-merge enable step complete"

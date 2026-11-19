@@ -1,0 +1,135 @@
+name: 'ESLint Check'
+description: |
+  Run ESLint on a Node.js project with configurable config file and
+  maximum warnings threshold. Produces error/warning counts as outputs.
+
+branding:
+  icon: 'shield'
+  color: 'purple'
+
+inputs:
+  working_directory:
+    description: 'Directory to run ESLint in'
+    required: false
+    default: '.'
+  config_file:
+    description: 'Path to ESLint config file'
+    required: false
+    default: 'eslint.config.cjs'
+  max_warnings:
+    description: 'Maximum allowed warnings before failure (0 = fail on any warning)'
+    required: false
+    default: '0'
+  package_manager:
+    description: 'Package manager used for cache key + install (npm or pnpm)'
+    required: false
+    default: 'npm'
+
+outputs:
+  exit_code:
+    description: 'ESLint exit code'
+    value: ${{ steps.eslint.outputs.exit_code }}
+  error_count:
+    description: 'Total number of errors found'
+    value: ${{ steps.eslint.outputs.error_count }}
+  warning_count:
+    description: 'Total number of warnings found'
+    value: ${{ steps.eslint.outputs.warning_count }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Setup pnpm (when pnpm)
+      if: inputs.package_manager == 'pnpm'
+      uses: pnpm/action-setup@v6
+      with:
+        version: 9
+
+    - name: Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: '20'
+        cache: ${{ inputs.package_manager }}
+
+    - name: Install dependencies
+      working-directory: ${{ inputs.working_directory }}
+      shell: bash
+      run: |
+        case "${{ inputs.package_manager }}" in
+          pnpm)
+            corepack enable
+            pnpm install --frozen-lockfile
+            ;;
+          *)
+            npm ci
+            ;;
+        esac
+
+    - name: Verify ESLint config exists
+      working-directory: ${{ inputs.working_directory }}
+      shell: bash
+      run: |
+        CONFIG="${{ inputs.config_file }}"
+        if [ ! -f "$CONFIG" ]; then
+          echo "::error::ESLint config not found: $CONFIG"
+          exit 1
+        fi
+        echo "::notice::Using ESLint config: $CONFIG"
+
+    - name: Run ESLint
+      id: eslint
+      working-directory: ${{ inputs.working_directory }}
+      shell: bash
+      run: |
+        CONFIG="${{ inputs.config_file }}"
+        MAX_WARNINGS="${{ inputs.max_warnings }}"
+        REPORT="eslint-report.json"
+
+        set +e
+        npx eslint . \
+          --config "$CONFIG" \
+          --max-warnings "$MAX_WARNINGS" \
+          --format json \
+          -o "$REPORT"
+        EXIT_CODE=$?
+        set -e
+
+        if [ -f "$REPORT" ]; then
+          COUNTS=$(node -e "
+            const report = require('./$REPORT');
+            let errors = 0, warnings = 0;
+            report.forEach(file => {
+              if (file.messages) {
+                file.messages.forEach(msg => {
+                  if (msg.severity === 2) errors++;
+                  else if (msg.severity === 1) warnings++;
+                });
+              }
+            });
+            console.log(errors + ' ' + warnings);
+          ")
+          ERRORS=$(echo "$COUNTS" | awk '{print $1}')
+          WARNINGS=$(echo "$COUNTS" | awk '{print $2}')
+          rm -f "$REPORT"
+        else
+          ERRORS=0
+          WARNINGS=0
+        fi
+
+        echo "exit_code=$EXIT_CODE" >> "$GITHUB_OUTPUT"
+        echo "error_count=$ERRORS" >> "$GITHUB_OUTPUT"
+        echo "warning_count=$WARNINGS" >> "$GITHUB_OUTPUT"
+
+        if [ "$ERRORS" -gt 0 ]; then
+          echo "::error::$ERRORS error(s) found by ESLint"
+        fi
+        if [ "$WARNINGS" -gt 0 ]; then
+          echo "::warning::$WARNINGS warning(s) found by ESLint"
+        fi
+        if [ "$EXIT_CODE" -eq 0 ]; then
+          echo "::notice::ESLint passed (errors: $ERRORS, warnings: $WARNINGS)"
+        else
+          echo "::error::ESLint failed with exit code $EXIT_CODE"
+        fi
+
+        exit $EXIT_CODE

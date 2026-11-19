@@ -1,0 +1,232 @@
+# DEPRECATED (v1.70.0): The standard-pre-commit composite is the
+# canonical hook source for all DarojaAI repos as of v1.69.0. This
+# reusable is the legacy pre-standard version and is marked deprecated
+# at v1.50.5+. Removal at v2.0.0.
+#
+# Consumers pinning `reusable-pre-commit.yml@v1.50.5` should migrate
+# to `reusable-pre-commit-standard.yml@v1.69.0+`. The new wrapper
+# accepts the same `python-version`, `terraform-version`, and
+# `post-comment` inputs (forward-compat) and adds `path-excludes:`
+# (newline-delimited globs merged into every hook's `exclude:`
+# regex at runtime — replaces the removed `skip-hooks:` input).
+# See composite/standard-pre-commit/EXCEPTIONS.md "Per-file exemption"
+# for the rationale and PR test.
+#
+# Why deprecated: the standard-pre-commit composite pins the org-
+# canonical pre-commit hooks at the same tag as the composite itself.
+# Consumers using this legacy reusable get whatever hooks they had
+# before pinning, but no guarantee that those hooks match the
+# current org standard. The ruleset-audit composite flags consumer
+# hooks that drift from the canonical pins.
+#
+# Removal plan: at v2.0.0, this file is deleted. Bump consumers to
+# reusable-pre-commit-standard.yml@v1.69.0+ in the same PR that
+# bumps them to v2.0.0.
+
+name: Reusable Pre-Commit Checks
+
+on:
+  workflow_call:
+    inputs:
+      runner:
+        description: 'Runner label for the jobs in this workflow. Empty (the default) uses vars.RUNNER_POOL, resolved in the calling repo or org, then falls back to ubicloud-standard-4 so a caller without the variable never lands on a GitHub-hosted runner.'
+        required: false
+        type: string
+        default: ''
+      python-version:
+        description: 'Python version to use'
+        required: false
+        default: '3.11'
+        type: string
+      terraform-version:
+        description: 'Terraform version to install (empty string skips)'
+        required: false
+        default: ''
+        type: string
+      skip-hooks:
+        description: 'Comma-separated list of pre-commit hooks to skip'
+        required: false
+        default: ''
+        type: string
+      post-comment:
+        description: 'Post result comment on PR'
+        required: false
+        default: true
+        type: boolean
+      app-client-id:
+        description: 'Client ID of the darojaai-repo-reader App (pass vars.REPO_READER_CLIENT_ID). With app-private-key, private repos are read with a short-lived read-only App token instead of github-token. See github-apps/README.md.'
+        required: false
+        default: ''
+        type: string
+      app-owner:
+        description: 'Account that owns the private repos the App token reads.'
+        required: false
+        default: 'DarojaAI'
+        type: string
+      app-repositories:
+        description: 'Comma-separated repos (in app-owner) the App token may read. List every private repo the job fetches (py-daroja-libs, private Terraform modules): git uses this token for all of github.com, so an unlisted private repo fails to clone.'
+        required: false
+        default: 'py-daroja-libs'
+        type: string
+    secrets:
+      github-token:
+        description: 'GitHub token for private module access'
+        required: false
+      app-private-key:
+        description: 'Private key of the darojaai-repo-reader App (pass secrets.REPO_READER_KEY).'
+        required: false
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  pre-commit:
+    name: Pre-Commit Validation
+    runs-on: ${{ inputs.runner || vars.RUNNER_POOL || 'ubicloud-standard-4' }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Check App credentials
+        id: app-inputs
+        env:
+          APP_CLIENT_ID: ${{ inputs.app-client-id }}
+          APP_PRIVATE_KEY: ${{ secrets.app-private-key }}
+        run: |
+          set -euo pipefail
+          # Presence checks only. The key is never printed.
+          if [ -n "$APP_CLIENT_ID" ] && [ -z "$APP_PRIVATE_KEY" ]; then
+            echo "::error::app-client-id is set but the app-private-key secret is empty (check REPO_READER_KEY is visible to this repo, in the Dependabot store too for Dependabot PRs). Set both, or neither."
+            exit 1
+          fi
+          if [ -z "$APP_CLIENT_ID" ] && [ -n "$APP_PRIVATE_KEY" ]; then
+            echo "::error::app-private-key is set but app-client-id is empty. Set both, or neither."
+            exit 1
+          fi
+          echo "use-app=$([ -n "$APP_CLIENT_ID" ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
+
+      - name: Mint read-only App token for private repos
+        id: app-token
+        if: steps.app-inputs.outputs.use-app == 'true'
+        # Falls back to github-token if minting fails (for example the App is not
+        # installed on one of app-repositories); the next step says so.
+        continue-on-error: true
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        with:
+          client-id: ${{ inputs.app-client-id }}
+          private-key: ${{ secrets.app-private-key }}
+          owner: ${{ inputs.app-owner }}
+          repositories: ${{ inputs.app-repositories }}
+          permission-contents: read
+
+      - name: Warn if the App token was not used
+        if: steps.app-token.outcome == 'failure'
+        env:
+          APP_OWNER: ${{ inputs.app-owner }}
+          APP_REPOS: ${{ inputs.app-repositories }}
+        run: echo "::warning title=darojaai-repo-reader::Could not mint the App token for ${APP_OWNER} repos ${APP_REPOS} (is the App installed on all of them?). Falling back to the github-token secret, if one was passed."
+
+      - name: Configure Git for Private Module Access
+        env:
+          TOKEN: ${{ steps.app-token.outputs.token || secrets.github-token }}
+        run: |
+          if [ -n "$TOKEN" ]; then
+            git config --global url."https://x-access-token:${TOKEN}@github.com/".insteadOf https://github.com/
+            # Disable shallow-clone verification to avoid auth edge cases
+            git config --global fetch.fsckObjects false
+            git config --global transfer.fsckObjects false
+          fi
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: ${{ inputs.python-version }}
+          cache: 'pip'
+
+      - name: Set up Terraform (optional)
+        if: inputs.terraform-version != ''
+        uses: hashicorp/setup-terraform@v4
+        with:
+          terraform_version: ${{ inputs.terraform-version }}
+
+      - name: Cache pre-commit
+        uses: actions/cache@v5
+        with:
+          path: ~/.cache/pre-commit
+          key: pre-commit-${{ runner.os }}-${{ hashFiles('.pre-commit-config.yaml') }}
+          restore-keys: |
+            pre-commit-${{ runner.os }}-
+
+      - name: Install pre-commit
+        run: pip install pre-commit
+
+      - name: Determine run mode
+        id: mode
+        run: |
+          if [ "${{ github.event_name }}" == "pull_request" ]; then
+            echo "mode=changed-only" >> "$GITHUB_OUTPUT"
+            echo "Running on changed files only (PR mode)"
+          else
+            echo "mode=all-files" >> "$GITHUB_OUTPUT"
+            echo "Running on all files"
+          fi
+
+      - name: Fetch base branch (for PR changed-files mode)
+        if: steps.mode.outputs.mode == 'changed-only'
+        run: git fetch origin ${{ github.base_ref }} --depth=1
+
+      - name: Detect Docker availability
+        id: docker
+        run: |
+          if docker info >/dev/null 2>&1; then
+            echo "available=true" >> "$GITHUB_OUTPUT"
+            echo "Docker is available"
+          else
+            echo "available=false" >> "$GITHUB_OUTPUT"
+            echo "Docker is NOT available — will skip hadolint-docker"
+          fi
+
+      - name: Run pre-commit
+        id: pre-commit
+        env:
+          SKIP: ${{ inputs.skip-hooks }}${{ steps.docker.outputs.available == 'false' && ',hadolint-docker' || '' }}
+        run: |
+          set -euo pipefail
+          MODE="${{ steps.mode.outputs.mode }}"
+          if [ "$MODE" == "changed-only" ]; then
+            pre-commit run --from-ref "origin/${{ github.base_ref }}" --to-ref HEAD --show-diff-on-failure
+          else
+            pre-commit run --all-files --show-diff-on-failure
+          fi
+
+      - name: Comment on PR with results
+        if: github.event_name == 'pull_request' && inputs.post-comment
+        uses: actions/github-script@v8
+        with:
+          script: |
+            const outcome = '${{ steps.pre-commit.outcome }}';
+            const body = outcome === 'failure'
+              ? `❌ **Pre-commit checks failed**
+
+            Run locally to fix:
+            \`\`\`bash
+            pip install pre-commit
+            pre-commit install
+            pre-commit run --all-files
+            \`\`\`
+
+            Common fixes:
+            - \`terraform fmt -recursive\` — Format Terraform
+            - \`black .\` — Format Python
+            - \`yamllint -d relaxed .\` — Format YAML
+            - Check the logs above for specific errors`
+              : `✅ **Pre-commit checks passed**`;
+
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: body
+            })
+        continue-on-error: true
