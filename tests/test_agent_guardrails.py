@@ -32,7 +32,7 @@ HEAD_DATE = "2026-11-01T10:00:00+00:00"
 BEFORE = "2026-11-01T09:00:00Z"
 AFTER = "2026-11-01T11:00:00Z"
 APPROVER = "patelmm79"
-# Mirrors linux-desktop-seed config/agent-coding.json guardrails.reviewed_path_groups.
+# Mirrors the setup repository's reviewed path groups (the ruleset's required-reviewer patterns).
 REVIEWED_PATH_GROUPS = [["*CODEOWNERS", "*agent-guardrails*", "*claude-guardrails*", "*claude-run*", "*auto*merge*", "*ready-merge*", "*agent-coding*", "*agent-gh*", "*open-agent-pr*", "*ruleset*", "*branch*protection*", "*semgrep_gate*", "*.semgrepignore", ".semgrep/[!b]*", "tests/canaries/*"]]
 
 
