@@ -4,7 +4,7 @@ on:
   workflow_call:
     inputs:
       runner:
-        description: 'Runner label for the jobs in this workflow. Empty (the default) uses vars.RUNNER_POOL, resolved in the calling repo or org, then falls back to ubicloud-standard-4 so a caller without the variable never lands on a GitHub-hosted runner.'
+        description: 'Runner label for the jobs in this workflow. Empty (the default) uses the calling repo or org variable RUNNER_POOL if set, else ubuntu-latest.'
         required: false
         type: string
         default: ''
@@ -65,7 +65,7 @@ permissions:
 jobs:
   check:
     name: Check branch protection
-    runs-on: ${{ inputs.runner || vars.RUNNER_POOL || 'ubicloud-standard-4' }}
+    runs-on: ${{ inputs.runner || vars.RUNNER_POOL || 'ubuntu-latest' }}
     outputs:
       protected: ${{ steps.audit.outputs.protected }}
       missing: ${{ steps.audit.outputs.missing }}
@@ -220,7 +220,7 @@ jobs:
           current_raw = os.environ["CURRENT"]
           baseline_input = os.environ.get("BASELINE_INPUT", "").strip()
 
-          # DarojaAI baseline (matches what we applied to dev-nexus at 23:54 UTC)
+          # Default baseline (override with the baseline_json input)
           default_baseline = {
               "enforce_admins": True,
               "required_linear_history": True,

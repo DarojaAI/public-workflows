@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # =============================================================================
 # Regression tests for the optional GitHub App token on
-#   reusable-check-branch-protection.yml (IA-04)
+#   reusable-check-branch-protection.yml
 # (reusable-verify-required-checks.yml is not public; it keeps its own test.)
 #
 # Contract under test (mirrors reusable-security-gate.yml):
@@ -99,12 +99,12 @@ for entry in $FILES; do
   else bad "$tag: both set"; fi
 
   out="$WORK/$tag.o2"; : > "$out"
-  if run_validate "$script" "Iv1.x" "FAKE-KEY-VALUE" "DarojaAI/bond-nexus" "$out" >/dev/null 2>&1 \
-     && grep -qx "repo-name=bond-nexus" "$out"; then ok "$tag: repo input in same owner -> scoped to that repo name"
+  if run_validate "$script" "Iv1.x" "FAKE-KEY-VALUE" "DarojaAI/other-repo" "$out" >/dev/null 2>&1 \
+     && grep -qx "repo-name=other-repo" "$out"; then ok "$tag: repo input in same owner -> scoped to that repo name"
   else bad "$tag: same-owner repo input"; fi
 
   out="$WORK/$tag.o2b"; : > "$out"
-  if run_validate "$script" "Iv1.x" "FAKE-KEY-VALUE" "darojaai/bond-nexus" "$out" >/dev/null 2>&1; then
+  if run_validate "$script" "Iv1.x" "FAKE-KEY-VALUE" "darojaai/other-repo" "$out" >/dev/null 2>&1; then
     ok "$tag: owner comparison ignores case"; else bad "$tag: owner case"; fi
 
   for badrepo in "Other/repo" "DarojaAI/a/b" "justname" "DarojaAI/.." "DarojaAI/x y" 'DarojaAI/x;id'; do

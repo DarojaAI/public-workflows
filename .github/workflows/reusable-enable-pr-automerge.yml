@@ -18,7 +18,7 @@ on:
   workflow_call:
     inputs:
       runner:
-        description: 'Runner label for the jobs in this workflow. Empty (the default) uses vars.RUNNER_POOL, resolved in the calling repo or org, then falls back to ubicloud-standard-4 so a caller without the variable never lands on a GitHub-hosted runner.'
+        description: 'Runner label for the jobs in this workflow. Empty (the default) uses the calling repo or org variable RUNNER_POOL if set, else ubuntu-latest.'
         required: false
         type: string
         default: ''
@@ -87,7 +87,7 @@ permissions:
 jobs:
   enable:
     name: Enable auto-merge
-    runs-on: ${{ inputs.runner || vars.RUNNER_POOL || 'ubicloud-standard-4' }}
+    runs-on: ${{ inputs.runner || vars.RUNNER_POOL || 'ubuntu-latest' }}
     steps:
       - name: Validate inputs
         env:
@@ -129,7 +129,7 @@ jobs:
       - name: Mint GitHub App token
         id: app-token
         if: steps.app-inputs.outputs.use-app == 'true'
-        # SHA must match the pin used by dev-nexus (see PR body).
+        # Pinned by commit SHA (v3.3.0).
         uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
         with:
           client-id: ${{ inputs.app-client-id }}
@@ -214,8 +214,7 @@ jobs:
           # command fails. The previous `|| echo "::warning::... Continuing."`
           # swallowed the actual error message and reported the step as
           # SUCCESS, leaving callers with no signal why auto-merge did
-          # not engage (observed on PR DarojaAI/rag_research_tool#1326,
-          # where the run completed in 2.2s with no error logged).
+          # not engage.
           echo "Enabling auto-merge on PR #$PR_NUMBER (method=$MERGE_METHOD)"
           # 2026-08-17 FIX: even when the caller opts into `skip-draft: false`
           # (intending auto-merge on drafts), GitHub's GraphQL API rejects
@@ -232,8 +231,7 @@ jobs:
           # Defensive check here: re-confirm draft state directly with the
           # GitHub API before attempting the merge. If the PR is still in
           # draft, exit 0 with a notice (this matches the step-3 gate's
-          # contract). `gh pr view` is cheap and idempotent. See
-          # the original issue for the consumer-side reproducer.
+          # contract). `gh pr view` is cheap and idempotent.
           if is_draft=$(gh pr view "$PR_NUMBER" --repo "${{ github.repository }}" --json isDraft -q '.isDraft' 2>/dev/null); then
             if [ "$is_draft" = "true" ]; then
               echo "::notice::PR #$PR_NUMBER transitioned to draft since trigger fired; skipping auto-merge (GraphQL rejects drafts)."

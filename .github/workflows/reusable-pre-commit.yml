@@ -1,27 +1,5 @@
-# DEPRECATED (v1.70.0): The standard-pre-commit composite is the
-# canonical hook source for all DarojaAI repos as of v1.69.0. This
-# reusable is the legacy pre-standard version and is marked deprecated
-# at v1.50.5+. Removal at v2.0.0.
-#
-# Consumers pinning `reusable-pre-commit.yml@v1.50.5` should migrate
-# to `reusable-pre-commit-standard.yml@v1.69.0+`. The new wrapper
-# accepts the same `python-version`, `terraform-version`, and
-# `post-comment` inputs (forward-compat) and adds `path-excludes:`
-# (newline-delimited globs merged into every hook's `exclude:`
-# regex at runtime — replaces the removed `skip-hooks:` input).
-# See composite/standard-pre-commit/EXCEPTIONS.md "Per-file exemption"
-# for the rationale and PR test.
-#
-# Why deprecated: the standard-pre-commit composite pins the org-
-# canonical pre-commit hooks at the same tag as the composite itself.
-# Consumers using this legacy reusable get whatever hooks they had
-# before pinning, but no guarantee that those hooks match the
-# current org standard. The ruleset-audit composite flags consumer
-# hooks that drift from the canonical pins.
-#
-# Removal plan: at v2.0.0, this file is deleted. Bump consumers to
-# reusable-pre-commit-standard.yml@v1.69.0+ in the same PR that
-# bumps them to v2.0.0.
+# Runs the caller repo's pre-commit hooks. To install private dependencies,
+# pass a read-only GitHub App (app-client-id + app-private-key) or a github-token.
 
 name: Reusable Pre-Commit Checks
 
@@ -29,7 +7,7 @@ on:
   workflow_call:
     inputs:
       runner:
-        description: 'Runner label for the jobs in this workflow. Empty (the default) uses vars.RUNNER_POOL, resolved in the calling repo or org, then falls back to ubicloud-standard-4 so a caller without the variable never lands on a GitHub-hosted runner.'
+        description: 'Runner label for the jobs in this workflow. Empty (the default) uses the calling repo or org variable RUNNER_POOL if set, else ubuntu-latest.'
         required: false
         type: string
         default: ''
@@ -54,26 +32,26 @@ on:
         default: true
         type: boolean
       app-client-id:
-        description: 'Client ID of the darojaai-repo-reader App (pass vars.REPO_READER_CLIENT_ID). With app-private-key, private repos are read with a short-lived read-only App token instead of github-token. See github-apps/README.md.'
+        description: 'Client ID of a read-only GitHub App. With app-private-key, private repos are read with a short-lived read-only App token instead of github-token.'
         required: false
         default: ''
         type: string
       app-owner:
-        description: 'Account that owns the private repos the App token reads.'
+        description: 'Account that owns the private repos the App token reads. Empty: the calling repo''s owner.'
         required: false
-        default: 'DarojaAI'
+        default: ''
         type: string
       app-repositories:
-        description: 'Comma-separated repos (in app-owner) the App token may read. List every private repo the job fetches (py-daroja-libs, private Terraform modules): git uses this token for all of github.com, so an unlisted private repo fails to clone.'
+        description: 'Comma-separated repos (in app-owner) the App token may read. List every private repo the job fetches (private packages, private Terraform modules): git uses this token for all of github.com, so an unlisted private repo fails to clone. Empty: the calling repo only.'
         required: false
-        default: 'py-daroja-libs'
+        default: ''
         type: string
     secrets:
       github-token:
         description: 'GitHub token for private module access'
         required: false
       app-private-key:
-        description: 'Private key of the darojaai-repo-reader App (pass secrets.REPO_READER_KEY).'
+        description: 'Private key of the GitHub App named by app-client-id.'
         required: false
 
 permissions:
@@ -83,7 +61,7 @@ permissions:
 jobs:
   pre-commit:
     name: Pre-Commit Validation
-    runs-on: ${{ inputs.runner || vars.RUNNER_POOL || 'ubicloud-standard-4' }}
+    runs-on: ${{ inputs.runner || vars.RUNNER_POOL || 'ubuntu-latest' }}
     steps:
       - name: Checkout code
         uses: actions/checkout@v6
@@ -97,7 +75,7 @@ jobs:
           set -euo pipefail
           # Presence checks only. The key is never printed.
           if [ -n "$APP_CLIENT_ID" ] && [ -z "$APP_PRIVATE_KEY" ]; then
-            echo "::error::app-client-id is set but the app-private-key secret is empty (check REPO_READER_KEY is visible to this repo, in the Dependabot store too for Dependabot PRs). Set both, or neither."
+            echo "::error::app-client-id is set but the app-private-key secret is empty (check the key secret is visible to this repo, in the Dependabot store too for Dependabot PRs). Set both, or neither."
             exit 1
           fi
           if [ -z "$APP_CLIENT_ID" ] && [ -n "$APP_PRIVATE_KEY" ]; then
@@ -125,7 +103,7 @@ jobs:
         env:
           APP_OWNER: ${{ inputs.app-owner }}
           APP_REPOS: ${{ inputs.app-repositories }}
-        run: echo "::warning title=darojaai-repo-reader::Could not mint the App token for ${APP_OWNER} repos ${APP_REPOS} (is the App installed on all of them?). Falling back to the github-token secret, if one was passed."
+        run: echo "::warning title=app-token::Could not mint the App token for ${APP_OWNER} repos ${APP_REPOS} (is the App installed on all of them?). Falling back to the github-token secret, if one was passed."
 
       - name: Configure Git for Private Module Access
         env:

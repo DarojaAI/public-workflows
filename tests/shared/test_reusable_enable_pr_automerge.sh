@@ -62,7 +62,7 @@ PYEOF
 # Run the extracted validation script with the given App inputs.
 # $1 = script path, $2 = client id, $3 = private key, $4 = output file.
 run_validate() {
-  env -i PATH="$PATH" GITHUB_REPOSITORY="DarojaAI/dev-nexus" \
+  env -i PATH="$PATH" GITHUB_REPOSITORY="DarojaAI/example-repo" \
     APP_CLIENT_ID="$2" APP_PRIVATE_KEY="$3" GITHUB_OUTPUT="$4" \
     bash "$1"
 }
@@ -105,10 +105,10 @@ for wf in "$ENABLE"; do
   # Both set: passes, use-app=true, repo name only.
   out="$WORK/$name.both.out"; : > "$out"
   if run_validate "$script" "Iv1.abc" "FAKE-KEY-VALUE" "$out" >/dev/null 2>&1 \
-     && grep -qx "use-app=true" "$out" && grep -qx "repo-name=dev-nexus" "$out"; then
-    ok "$name: both set -> use-app=true, repo-name=dev-nexus"
+     && grep -qx "use-app=true" "$out" && grep -qx "repo-name=example-repo" "$out"; then
+    ok "$name: both set -> use-app=true, repo-name=example-repo"
   else
-    bad "$name: both set -> expected use-app=true and repo-name=dev-nexus"
+    bad "$name: both set -> expected use-app=true and repo-name=example-repo"
   fi
 
   # Neither set: passes, use-app=false (GITHUB_TOKEN fallback).

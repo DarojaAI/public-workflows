@@ -101,8 +101,8 @@ Run the tests locally with `pip install pyyaml==6.0.2`, then
 ## Shared reusable workflows and actions
 
 Generic CI building blocks that public DarojaAI repos call. They used to live in
-a private DarojaAI repo, which public repos cannot call. The private copies
-now forward here, so private callers keep working.
+a private DarojaAI repo, which public repos cannot call. The private copies will
+forward here, so private callers keep working.
 
 | Path | What it does |
 | --- | --- |
@@ -127,7 +127,7 @@ jobs:
 ```
 
 All credentials come from the caller at run time (`secrets:` / `with:`). Jobs run on
-`inputs.runner`, else the caller's `vars.RUNNER_POOL`, else `ubicloud-standard-4`.
+`inputs.runner`, else the caller's `vars.RUNNER_POOL`, else `ubuntu-latest`.
 Each workflow's contract is pinned by a test in `tests/shared/`, run by
 `tests/test_shared_workflows.py`. Pin a tag as described below.
 
