@@ -1,0 +1,527 @@
+name: _Reusable Semantic Release
+
+on:
+  workflow_call:
+    inputs:
+      runner:
+        description: 'Runner label for the jobs in this workflow. Empty (the default) uses the calling repo or org variable RUNNER_POOL if set, else ubuntu-latest.'
+        required: false
+        type: string
+        default: ''
+      node-version:
+        description: 'Node.js version for semantic-release'
+        required: false
+        type: string
+        default: '20.x'
+      update-version-file:
+        description: 'Update VERSION file after release'
+        required: false
+        type: boolean
+        default: true
+      version-file-path:
+        description: 'Path to VERSION file'
+        required: false
+        type: string
+        default: 'VERSION'
+      working-directory:
+        description: 'Working directory for semantic-release'
+        required: false
+        type: string
+        default: '.'
+      extra-packages:
+        description: |
+          Extra npm packages to install (space-separated), e.g.
+          `@semantic-release/git@10.0.1`. Pin exact versions. The
+          base set (semantic-release, changelog, commit-analyzer,
+          release-notes-generator, github, conventionalcommits) is
+          already pinned by this reusable; do not override those here.
+          Note: for `type!:` headers to cut a major, the caller's
+          .releaserc must set `preset: conventionalcommits` on
+          @semantic-release/commit-analyzer and
+          @semantic-release/release-notes-generator.
+        required: false
+        type: string
+        default: ''
+      initial-version:
+        description: |
+          Override semantic-release's hardcoded first-release version.
+          Default semantic-release (and every published version since
+          2014) starts at 1.0.0 with no config knob to change it
+          (see semantic-release/semantic-release#268, #837, #1054,
+          #1125, #3435 — all closed without the feature). This input
+          works around that by `sed`-patching
+          `node_modules/semantic-release/lib/definitions/constants.js`
+          to set `FIRST_RELEASE` to the provided value. Empty string
+          (default) leaves the upstream behavior unchanged.
+
+          Use this for projects that want to start at 0.1.0 per
+          semver.org/#how-should-i-deal-with-revisions-in-the-0yz-initial-development-phase.
+          Affects only the first release; subsequent releases
+          increment normally from the previous tag.
+        required: false
+        type: string
+        default: ''
+      default-branch:
+        description: 'Target branch for the VERSION bump PR'
+        required: false
+        type: string
+        default: 'main'
+      skip-dirty-check:
+        description: 'Skip checking for uncommitted changes before running'
+        required: false
+        type: boolean
+        default: false
+      update-docs:
+        description: 'Update version references in documentation files after release'
+        required: false
+        type: boolean
+        default: false
+      docs-files:
+        description: 'Comma-separated list of doc files to scan for version references (e.g. README.md,docs/index.md)'
+        required: false
+        type: string
+        default: 'README.md'
+      docs-version-pattern:
+        description: 'Regex with a single capture group matching the OLD version string. Used to locate and replace version references in docs-files. Default matches semver with optional v-prefix.'
+        required: false
+        type: string
+        default: '\b(v)?(\d+)\.(\d+)\.(\d+)\b'
+      self-heal-orphan-tags:
+        description: |
+          If a tag for the next release version already exists on the
+          remote (typically from an interrupted previous run or a
+          hand-tagged release), delete it instead of failing.
+
+          Default: false (fail-fast with a clear error pointing at
+          the offending tag and the exact commands to clean it up).
+        required: false
+        type: boolean
+        default: false
+      fetch-depth:
+        description: |
+          Git checkout depth. semantic-release needs the full history
+          to walk commits since the last published release tag and
+          resolve the next version. `fetch-depth: 1` (shallow clone)
+          is the actions/checkout default, but it is the known-broken
+          setting for semantic-release: with a single
+          commit, the analyzer cannot determine the previous
+          version and either fails or publishes a wrong version.
+
+          Default: 0 (full history). This matches the documented
+          prerequisite for semantic-release. A caller that kept the
+          shallow default would otherwise have to inline the
+          semantic-release steps itself; this input closes that gap
+          for every repo consuming the reusable.
+
+          Set to 1 (or any positive integer) only if you know the
+          shallow clone is safe for your repo's release pipeline —
+          which is effectively never for semantic-release.
+        required: false
+        type: number
+        default: 0
+    secrets:
+      github-token:
+        description: 'GitHub token for releases'
+        required: true
+    outputs:
+      new-release-published:
+        description: 'Whether a new release was published'
+        value: ${{ jobs.release.outputs.new-release-published }}
+      new-release-version:
+        description: 'Version of the new release. Empty when this run published nothing.'
+        value: ${{ jobs.release.outputs.new-release-version }}
+      docs-updated:
+        description: 'Whether the docs-update job ran and pushed a docs PR'
+        value: ${{ jobs.docs-update.outputs.docs-updated }}
+
+permissions:
+  contents: write
+  issues: write
+  pull-requests: write
+
+jobs:
+  release:
+    runs-on: ${{ inputs.runner || vars.RUNNER_POOL || 'ubuntu-latest' }}
+    timeout-minutes: 30
+    outputs:
+      # The `semantic` step (npx semantic-release) writes no outputs;
+      # the writer is the `Extract version from tag` step (id: version),
+      # with underscore names. Sourcing from steps.semantic made both
+      # job outputs permanently empty — every consumer of
+      # new-release-published/new-release-version (workflow outputs,
+      # the docs-update job's needs.release.outputs gate) saw ''
+      # forever, so docs-update could never run for opt-in callers.
+      new-release-published: ${{ steps.version.outputs.new_release_published }}
+      new-release-version: ${{ steps.version.outputs.version }}
+    concurrency:
+      group: semantic-release-${{ github.repository }}
+      cancel-in-progress: false
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          # semantic-release needs the full history to walk commits
+          # since the last published release tag. `fetch-depth: 1`
+          # (the actions/checkout default) is the known-broken setting
+          # for semantic-release; see the `fetch-depth` input
+          # description.
+          fetch-depth: ${{ inputs.fetch-depth }}
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v5
+        with:
+          node-version: ${{ inputs.node-version }}
+
+      - name: Setup git config
+        run: |
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          git config --global user.name "github-actions[bot]"
+
+      - name: Install semantic-release
+        working-directory: ${{ inputs.working-directory }}
+        env:
+          EXTRA_PACKAGES: ${{ inputs.extra-packages }}
+        run: |
+          set -euo pipefail
+          rm -rf node_modules package-lock.json
+          # extra-packages may add plugins but must not re-pin the base
+          # set: npm lets the last spec win, so `commit-analyzer@^11`
+          # here would silently bring back the dropped-`!` bug
+          # described below.
+          # It arrives through env, never interpolated into the script.
+          read -r -a EXTRA <<<"${EXTRA_PACKAGES:-}"
+          for spec in ${EXTRA[@]+"${EXTRA[@]}"}; do
+            name="$(sed -E 's/^(@?[^@]+)(@.*)?$/\1/' <<<"$spec")"
+            case "$name" in
+              semantic-release|@semantic-release/changelog|@semantic-release/commit-analyzer|@semantic-release/release-notes-generator|@semantic-release/github|conventional-changelog-conventionalcommits)
+                echo "::error::extra-packages must not override the pinned base package ${name}"
+                exit 1 ;;
+            esac
+          done
+          # Install without --save / --save-dev so we do not mutate
+          # the caller's package.json. Using --save-dev rewrites
+          # package.json even when the listed devDeps are already
+          # present (versions are normalized, key order changes),
+          # which dirties the working tree and trips the pre-flight
+          # `git status --porcelain` check in the next step.
+          #
+          # conventional-changelog-conventionalcommits is the parser
+          # used by the `preset: conventionalcommits` config in
+          # .releaserc.json. It's a config-driven dep, not a hard
+          # dep of @semantic-release/commit-analyzer, so we have to
+          # install it explicitly. Without it, the analyzer fails
+          # with `Cannot find module 'conventional-changelog-conventionalcommits'`.
+          #
+          # Every version below is an exact pin, and they are a set:
+          # keep them together. commit-analyzer 11 and
+          # release-notes-generator 12 cannot read
+          # conventional-changelog-conventionalcommits 9 (it exports
+          # `parser`, they read `parserOpts`), which silently drops
+          # `feat!:` / `fix!:` headers (no release instead of a major).
+          # commit-analyzer 13 and release-notes-generator 14 read it.
+          # semantic-release 24.2.9, @semantic-release/github 11.0.6
+          # and these peers match. The same set is pinned in this
+          # repository's package.json;
+          # tests/shared/semantic_release/test_semantic_release_pins.py
+          # keeps the two equal and runs the analyzer on this install.
+          #
+          # --ignore-scripts: none of these packages need an install
+          # script, and a registry compromise should not get to run one
+          # on a runner holding a write token. A lockfile is not an
+          # option here: this job runs in the caller's checkout, which
+          # has no copy of this repo's files.
+          #
+          # NOTE for callers: `!` headers cut a major only when the
+          # caller's own .releaserc sets `preset: conventionalcommits`
+          # on @semantic-release/commit-analyzer (and
+          # release-notes-generator). Without a preset the analyzer
+          # uses the angular rules, which ignore `type!:`.
+          npm install --no-save --ignore-scripts \
+            semantic-release@24.2.9 \
+            @semantic-release/changelog@6.0.3 \
+            @semantic-release/commit-analyzer@13.0.1 \
+            conventional-changelog-conventionalcommits@9.3.1 \
+            @semantic-release/github@11.0.6 \
+            @semantic-release/release-notes-generator@14.1.1 \
+            ${EXTRA[@]+"${EXTRA[@]}"}
+
+      # Failure mode being prevented:
+      #
+      #   semantic-release analyzes commits since the last *published*
+      #   release, computes the next version (e.g. v1.21.7), and then
+      #   runs `git tag v1.21.7 <head-sha>`. If a tag with that version
+      #   already exists on the remote — because a previous run was
+      #   interrupted after the tag step but before the GitHub release
+      #   was published, or because someone manually tagged the commit
+      #   to "claim" the version — the tag command fails with exit
+      #   code 128 ("fatal: tag 'v1.21.7' already exists") and the
+      #   entire release is blocked.
+      #
+      # We detect this with a `--dry-run`, which runs the analyzer
+      # + verify-conditions but does NOT tag, push, or publish. We
+      # parse the next-version line out of the dry-run log, check
+      # whether that tag already exists on the remote, and either:
+      #
+      #   - self-heal (delete the orphan tag locally and remotely),
+      #     when the caller opted in via the self-heal-orphan-tags
+      #     input; OR
+      #   - fail fast with a clear error pointing at the exact
+      #     commands the operator can run by hand.
+      #
+      # Default is fail-fast: a stuck release is loud, not silent.
+      # Example: a manually created v1.21.7 tag with no GitHub release
+      # blocks the next release, which would also have been v1.21.7.
+
+      # Patch semantic-release's hardcoded FIRST_RELEASE constant.
+      # See the `initial-version` input description for why this
+      # exists. Only runs when the input is non-empty.
+      #
+      # Targets `lib/definitions/constants.js` (checked on v23 and v24.2.9). If a
+      # future semantic-release version moves the constant, the
+      # patch silently no-ops and subsequent steps surface the
+      # original 1.0.0 problem; we'd need to revisit this.
+      - name: Patch FIRST_RELEASE constant
+        if: ${{ inputs.initial-version != '' }}
+        working-directory: ${{ inputs.working-directory }}
+        run: |
+          set -euo pipefail
+          TARGET="node_modules/semantic-release/lib/definitions/constants.js"
+          if [ ! -f "$TARGET" ]; then
+            echo "::error::Cannot patch FIRST_RELEASE: $TARGET not found."
+            echo "::error::semantic-release may have moved the constant in a newer version."
+            echo "::error::Either upgrade this reusable's patch or drop the initial-version input."
+            exit 1
+          fi
+          if ! printf '%s' '${{ inputs.initial-version }}' | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+([-+].*)?$'; then
+            echo "::error::initial-version '${{ inputs.initial-version }}' is not a valid semver string."
+            exit 1
+          fi
+          cp "$TARGET" "${TARGET}.bak"
+          sed -i -E 's|export const FIRST_RELEASE = "[^"]+";|export const FIRST_RELEASE = "${{ inputs.initial-version }}";|' "$TARGET"
+          echo "Patched FIRST_RELEASE to '${{ inputs.initial-version }}':"
+          grep 'FIRST_RELEASE' "$TARGET"
+
+      - name: Detect and resolve orphan tag collisions
+        id: detect-orphan
+        working-directory: ${{ inputs.working-directory }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.github-token }}
+          GH_TOKEN: ${{ secrets.github-token }}
+          SELF_HEAL: ${{ inputs.self-heal-orphan-tags }}
+        run: |
+          set -euo pipefail
+
+          # 1. Dry-run to discover the next version semantic-release
+          #    would publish. We capture stderr+stdout and tail it for
+          #    the log; --dry-run does NOT tag, push, or publish.
+          echo "::group::semantic-release --dry-run output"
+          DRY_OUTPUT=$(npx semantic-release --dry-run 2>&1 || true)
+          echo "$DRY_OUTPUT" | tail -50
+          echo "::endgroup::"
+
+          # 2. Extract the next version. The line looks like:
+          #   [10:40:55 PM] [semantic-release] › ℹ  The next release version is 1.21.7
+          NEXT_VERSION=$(printf '%s\n' "$DRY_OUTPUT" \
+            | grep -oP 'next release version is \K\S+' \
+            | head -1 || true)
+
+          if [ -z "$NEXT_VERSION" ]; then
+            echo "No release pending (no commits since last published release). Orphan-tag check is a no-op."
+            exit 0
+          fi
+
+          TAG="v${NEXT_VERSION}"
+          echo "Next release would create tag: $TAG"
+
+          # 3. Check origin. ls-remote exits 0 even if the tag is
+          #    absent — it just prints nothing. We grep the output
+          #    for the tag name to make the presence check explicit.
+          if ! git ls-remote --tags origin "refs/tags/$TAG" 2>/dev/null | grep -q "refs/tags/$TAG$"; then
+            echo "Tag $TAG does not exist on origin; no collision."
+            exit 0
+          fi
+
+          # 4. Collision. Either self-heal or fail fast.
+          if [ "${SELF_HEAL:-false}" != "true" ]; then
+            echo "::error::Orphan tag $TAG already exists on origin."
+            echo "::error::semantic-release will fail on \`git tag $TAG\`. To fix, either:"
+            echo "::error::  (a) re-run this workflow with self-heal-orphan-tags=true, OR"
+            echo "::error::  (b) manually delete the orphan tag:"
+            echo "::error::      git push origin :refs/tags/$TAG"
+            echo "::error::      git tag -d $TAG"
+            echo "::error::Then re-run this workflow."
+            exit 1
+          fi
+
+          echo "::warning::Orphan tag $TAG detected on origin. self-heal-orphan-tags=true; deleting local + remote."
+          git push origin ":refs/tags/$TAG"
+          # The local tag may not exist (the runner is a shallow clone);
+          # the `|| true` makes this defensive.
+          git tag -d "$TAG" 2>/dev/null || true
+          echo "Orphan tag $TAG deleted. semantic-release will now create a fresh one."
+
+      - name: Run semantic-release
+        id: semantic
+        working-directory: ${{ inputs.working-directory }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.github-token }}
+          GH_TOKEN: ${{ secrets.github-token }}
+        run: |
+          # Check for uncommitted changes (unless skipped)
+          if [ "${{ inputs.skip-dirty-check }}" != "true" ] && [ -n "$(git status --porcelain)" ]; then
+            echo "ERROR: Uncommitted changes detected. Please commit or stash them before running."
+            echo "To skip this check, set skip-dirty-check input to true."
+            exit 1
+          fi
+
+          # The next step compares against this to see what this run created.
+          git tag --list > "$RUNNER_TEMP/tags-before-release.txt"
+
+          npx semantic-release
+
+      - name: Extract version from tag
+        id: version
+        run: |
+          # semantic-release exits 0 with no release when there is nothing to publish,
+          # and any repo with an old tag has a "latest tag", so only a tag that this run
+          # created, on this commit, means a release. `@` marks a channel tag.
+          NEW_TAG=$(git tag --points-at HEAD | sort \
+            | comm -13 <(sort "$RUNNER_TEMP/tags-before-release.txt") - \
+            | grep -v '@' | sort -V | tail -n 1 || true)
+          if [ -n "$NEW_TAG" ]; then
+            VERSION=${NEW_TAG#v}
+            echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+            echo "new_release_published=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::Release version: $VERSION"
+          else
+            echo "new_release_published=false" >> "$GITHUB_OUTPUT"
+            echo "No release published by this run."
+          fi
+
+      - name: Update VERSION file
+        if: steps.version.outputs.new_release_published == 'true' && inputs.update-version-file && steps.version.outputs.version != ''
+        env:
+          GH_TOKEN: ${{ secrets.github-token }}
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          echo "$VERSION" > "${{ inputs.version-file-path }}"
+
+          BRANCH_NAME="chore/version-bump-$VERSION"
+
+          # Delete existing branch if it exists
+          git branch -D "$BRANCH_NAME" 2>/dev/null || true
+          git checkout -b "$BRANCH_NAME"
+          git add "${{ inputs.version-file-path }}"
+          git commit -m "chore: bump VERSION to $VERSION [skip ci]" || echo "Nothing to commit"
+          git push https://x-access-token:"${GH_TOKEN}"@github.com/"${{ github.repository }}" "$BRANCH_NAME" --force
+
+          # Create and auto-merge PR
+          # Check if PR already exists for this branch
+          EXISTING_PR=$(gh pr list --head "$BRANCH_NAME" --json number --jq '.[0].number' 2>/dev/null || echo "")
+
+          if [ -n "$EXISTING_PR" ]; then
+            echo "PR already exists: #$EXISTING_PR"
+            PR_NUMBER="$EXISTING_PR"
+          else
+            PR_NUMBER=$(gh api repos/${{ github.repository }}/pulls \
+              --method POST \
+              --field title="chore: bump VERSION to $VERSION" \
+              --field head="$BRANCH_NAME" \
+              --field base=${{ inputs.default-branch }} \
+              --field body="Automated VERSION file bump from semantic-release" \
+              --jq '.number' 2>/dev/null || echo "0")
+          fi
+
+          if [ "$PR_NUMBER" != "0" ]; then
+            gh api repos/${{ github.repository }}/pulls/"$PR_NUMBER"/merge \
+              --method PUT \
+              --field merge_method=squash || {
+                echo "::error::PR merge failed for VERSION bump #$PR_NUMBER"
+                exit 1
+              }
+          fi
+
+  docs-update:
+    needs: release
+    if: needs.release.outputs.new-release-published == 'true' && inputs.update-docs
+    runs-on: ${{ inputs.runner || vars.RUNNER_POOL || 'ubuntu-latest' }}
+    permissions:
+      contents: write
+      pull-requests: write
+    outputs:
+      docs-updated: ${{ steps.update.outputs.docs-updated }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          # docs-update also walks tags to find the previous release
+          # version (`git describe --tags --abbrev=0 HEAD~1`), so
+          # it needs the same depth as the release job.
+          fetch-depth: ${{ inputs.fetch-depth }}
+
+      - name: Update documentation version references
+        id: update
+        env:
+          GH_TOKEN: ${{ secrets.github-token }}
+          NEW_VERSION: ${{ needs.release.outputs.new-release-version }}
+        run: |
+          NEW="$NEW_VERSION"
+
+          # Get the previous version (tag immediately before the just-released one)
+          PREV=$(git describe --tags --abbrev=0 HEAD~1 2>/dev/null | sed 's/^v//' || echo "")
+          if [ -z "$PREV" ]; then
+            echo "No previous version tag found; nothing to update."
+            exit 0
+          fi
+
+          echo "Updating doc references: $PREV → $NEW"
+
+          CHANGED=0
+          IFS=',' read -ra FILES <<< '${{ inputs.docs-files }}'
+          for FILE in "${FILES[@]}"; do
+            FILE_TRIM="$(echo "$FILE" | xargs)"
+            [ -z "$FILE_TRIM" ] && continue
+            if [ ! -f "$FILE_TRIM" ]; then
+              echo "  [skip] $FILE_TRIM (not found)"
+              continue
+            fi
+            # Replace old version with new, preserving the v-prefix if the original had one.
+            # Matches whole-token semver (vX.Y.Z or X.Y.Z).
+            perl -i -pe "s{\b(v?)\Q$PREV\E\b}{\${1}${NEW}}g" "$FILE_TRIM"
+            if ! git diff --quiet "$FILE_TRIM"; then
+              echo "  [updated] $FILE_TRIM"
+              CHANGED=$((CHANGED + 1))
+            else
+              echo "  [unchanged] $FILE_TRIM"
+            fi
+          done
+
+          if [ "$CHANGED" -eq 0 ]; then
+            echo "No doc files needed updating."
+            echo "docs-updated=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "docs-updated=true" >> "$GITHUB_OUTPUT"
+
+          BRANCH="chore/docs-update-$NEW"
+          git checkout -b "$BRANCH"
+          # Intentional word splitting: docs-files is a comma-separated list.
+          # shellcheck disable=SC2046
+          git add $(echo "${{ inputs.docs-files }}" | tr ',' ' ')
+          git commit -m "chore: update docs to $NEW [skip ci]"
+          git push https://x-access-token:"${GH_TOKEN}"@github.com/"${{ github.repository }}" "$BRANCH" --force
+
+          # Create PR (idempotent — reuse if branch PR already exists)
+          EXISTING=$(gh pr list --head "$BRANCH" --json number --jq '.[0].number' 2>/dev/null || echo "")
+          if [ -n "$EXISTING" ]; then
+            echo "PR already exists: #$EXISTING"
+            exit 0
+          fi
+          gh api repos/${{ github.repository }}/pulls \
+            --method POST \
+            --field title="chore: update docs to $NEW" \
+            --field head="$BRANCH" \
+            --field base=${{ inputs.default-branch }} \
+            --field body="Automated docs version-reference update from semantic-release (companion to the v$NEW release)." \
+            --jq '.number'
