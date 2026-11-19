@@ -310,7 +310,7 @@ if audit_with 200 '{"enforce_admins":{"enabled":true}}' "$TEST_BASE" && grep -qx
 if audit_with 200 "${FULL_PROT/\"required_approving_review_count\":2/\"required_approving_review_count\":1}" "$TEST_BASE" && grep -qxF 'missing=["required_pull_request_reviews"]' "$WORK/audit.out"; then
   ok "audit: review count below baseline -> missing"; else bad "audit: review count below baseline"; fi
 # No built-in baseline: empty input is an error on every path, never a pass.
-for st in 200 404; do
+for st in 200 403 404; do
   if audit_with "$st" "$FULL_PROT" ""; then bad "audit: empty baseline accepted (status $st)"
   elif grep -q "::error::baseline_json is required" "$WORK/audit.log" && ! grep -q "^protected=" "$WORK/audit.out"; then ok "audit: empty baseline -> ::error:: (status $st)"
   else bad "audit: empty baseline wrong failure (status $st)"; fi
