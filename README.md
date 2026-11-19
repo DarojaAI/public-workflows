@@ -110,6 +110,7 @@ forward here, so private callers keep working.
 | `.github/workflows/reusable-terraform-stub-plan.yml` | `terraform plan` against stubbed providers, failing on any plan error |
 | `.github/workflows/reusable-enable-pr-automerge.yml` | Enables auto-merge on matching PRs (GITHUB_TOKEN or an App token) |
 | `.github/workflows/reusable-check-branch-protection.yml` | Compares a branch's live protection with a baseline (github-token or an App token) |
+| `.github/workflows/reusable-semantic-release.yml` | Cuts the next semver release with semantic-release from pinned packages; optional VERSION file and docs version bump PRs |
 | `actions/check/eslint` | ESLint |
 | `actions/check/typescript` | `tsc --noEmit` |
 | `actions/check/vitest` | Vitest unit tests |
@@ -126,10 +127,39 @@ jobs:
       - uses: DarojaAI/public-workflows/actions/check/eslint@vX.Y.Z
 ```
 
+`reusable-semantic-release.yml` details:
+
+- **Inputs** (all optional): `runner`, `node-version` (`20.x`), `update-version-file`
+  (`true`), `version-file-path` (`VERSION`), `working-directory` (`.`), `extra-packages`
+  (space-separated, exact pins; the base set cannot be overridden), `initial-version`
+  (first release version, empty keeps semantic-release's `1.0.0`), `default-branch`
+  (`main`), `skip-dirty-check` (`false`), `update-docs` (`false`), `docs-files`
+  (`README.md`), `docs-version-pattern`, `self-heal-orphan-tags` (`false`: fail fast
+  when the next tag already exists on the remote; `true` deletes it), `fetch-depth`
+  (`0`, full history).
+- **Secrets:** `github-token` (required).
+- **Outputs:** `new-release-published`, `new-release-version` (empty when nothing was
+  published), `docs-updated`.
+- **Caller's `.releaserc`:** set `preset: conventionalcommits` on
+  `@semantic-release/commit-analyzer` and `@semantic-release/release-notes-generator`,
+  or `type!:` headers will not cut a major.
+- **Inputs are used as-is in shell steps.** Pass constants or values you control, never
+  data from an untrusted event (for example a PR title under `pull_request_target`).
+
+```yaml
+jobs:
+  release:
+    uses: DarojaAI/public-workflows/.github/workflows/reusable-semantic-release.yml@vX.Y.Z
+    secrets:
+      github-token: ${{ secrets.GITHUB_TOKEN }}
+```
+
 All credentials come from the caller at run time (`secrets:` / `with:`). Jobs run on
 `inputs.runner`, else the caller's `vars.RUNNER_POOL`, else `ubuntu-latest`.
-Each workflow's contract is pinned by a test in `tests/shared/`, run by
-`tests/test_shared_workflows.py`. Pin a tag as described below.
+Each workflow's contract is pinned by a test in `tests/shared/`: the shell scripts are
+run by `tests/test_shared_workflows.py`, and the semantic-release tests in
+`tests/shared/semantic_release/` by `python -m pytest -q tests/shared/semantic_release`
+(needs pytest, node, npm and the npm registry). Pin a tag as described below.
 
 ## Releases and pinning
 

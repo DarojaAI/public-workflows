@@ -25,6 +25,7 @@ class SharedWorkflowShellTests(unittest.TestCase):
         expected = {
             "test_reusable_check_branch_protection_app_token.sh",
             "test_reusable_enable_pr_automerge.sh",
+            "test_reusable_semantic_release_orphan_tag.sh",
             "test_reusable_terraform_stub_plan.sh",
         }
         self.assertTrue(expected <= names, f"missing: {sorted(expected - names)}")
