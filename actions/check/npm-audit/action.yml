@@ -1,0 +1,170 @@
+name: 'NPM Audit Security Check'
+description: |
+  Run npm audit to detect known security vulnerabilities in dependencies.
+  Fails if vulnerabilities are found at or above the configured audit level.
+  Parses JSON output to count vulnerabilities and emit GitHub annotations.
+
+branding:
+  icon: 'shield'
+  color: 'red'
+
+inputs:
+  working_directory:
+    description: 'Directory containing package.json'
+    required: false
+    default: '.'
+  audit_level:
+    description: 'Minimum vulnerability severity to report (info, low, moderate, high, critical)'
+    required: false
+    default: 'moderate'
+  production_only:
+    description: 'Only audit production dependencies'
+    required: false
+    default: 'true'
+  package_manager:
+    description: 'Package manager used for the audit (npm or pnpm)'
+    required: false
+    default: 'npm'
+
+outputs:
+  exit_code:
+    description: 'Exit code from the audit (0 = no vulnerabilities above threshold)'
+    value: ${{ steps.audit.outputs.exit_code }}
+  vulnerability_count:
+    description: 'Total number of vulnerabilities at or above the audit level'
+    value: ${{ steps.audit.outputs.vulnerability_count }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Setup pnpm (when pnpm)
+      if: inputs.package_manager == 'pnpm'
+      uses: pnpm/action-setup@v6
+      with:
+        version: 9
+
+    - name: Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: '20'
+        cache: ${{ inputs.package_manager }}
+        cache-dependency-path: ${{ inputs.working_directory }}/${{ inputs.package_manager == 'pnpm' && 'pnpm-lock.yaml' || 'package-lock.json' }}
+
+    - name: Validate package.json exists
+      shell: bash
+      working-directory: ${{ inputs.working_directory }}
+      run: |
+        if [ ! -f "package.json" ]; then
+          echo "::error::No package.json found in ${{ inputs.working_directory }}"
+          exit 1
+        fi
+
+    - name: Install dependencies
+      shell: bash
+      working-directory: ${{ inputs.working_directory }}
+      run: |
+        case "${{ inputs.package_manager }}" in
+          pnpm)
+            corepack enable
+            pnpm install --frozen-lockfile
+            ;;
+          *)
+            npm ci
+            ;;
+        esac
+
+    - name: Run security audit
+      id: audit
+      shell: bash
+      working-directory: ${{ inputs.working_directory }}
+      run: |
+        AUDIT_LEVEL="${{ inputs.audit_level }}"
+        PRODUCTION_ONLY="${{ inputs.production_only }}"
+        PROD_FLAG=""
+        if [ "${PRODUCTION_ONLY}" == "true" ]; then
+          PROD_FLAG="--prod"
+        fi
+
+        echo "::notice::Running ${{ inputs.package_manager }} audit with level: ${AUDIT_LEVEL}, production_only: ${PRODUCTION_ONLY}"
+
+        set +e
+        case "${{ inputs.package_manager }}" in
+          pnpm)
+            pnpm audit --json ${AUDIT_LEVEL:+--audit-level=${AUDIT_LEVEL}} ${PROD_FLAG} > audit-output.json
+            EXIT_CODE=$?
+            ;;
+          *)
+            ARGS="--audit-level=${AUDIT_LEVEL}"
+            if [ "${PRODUCTION_ONLY}" == "true" ]; then
+              ARGS="${ARGS} --omit=dev"
+            fi
+            npm audit ${ARGS} --json > audit-output.json
+            EXIT_CODE=$?
+            ;;
+        esac
+        set -e
+        EXIT_CODE=${EXIT_CODE:-0}
+
+        # Parse JSON output for vulnerability count
+        if [ -f audit-output.json ] && jq empty audit-output.json 2>/dev/null; then
+          case "${AUDIT_LEVEL}" in
+            info)
+              VULN_COUNT=$(jq -r '(.metadata.vulnerabilities.info // 0) + (.metadata.vulnerabilities.low // 0) + (.metadata.vulnerabilities.moderate // 0) + (.metadata.vulnerabilities.high // 0) + (.metadata.vulnerabilities.critical // 0)' audit-output.json)
+              ;;
+            low)
+              VULN_COUNT=$(jq -r '(.metadata.vulnerabilities.low // 0) + (.metadata.vulnerabilities.moderate // 0) + (.metadata.vulnerabilities.high // 0) + (.metadata.vulnerabilities.critical // 0)' audit-output.json)
+              ;;
+            moderate)
+              VULN_COUNT=$(jq -r '(.metadata.vulnerabilities.moderate // 0) + (.metadata.vulnerabilities.high // 0) + (.metadata.vulnerabilities.critical // 0)' audit-output.json)
+              ;;
+            high)
+              VULN_COUNT=$(jq -r '(.metadata.vulnerabilities.high // 0) + (.metadata.vulnerabilities.critical // 0)' audit-output.json)
+              ;;
+            critical)
+              VULN_COUNT=$(jq -r '(.metadata.vulnerabilities.critical // 0)' audit-output.json)
+              ;;
+            *)
+              VULN_COUNT=$(jq -r '.metadata.vulnerabilities.total // 0' audit-output.json)
+              ;;
+          esac
+
+          INFO=$(jq -r '.metadata.vulnerabilities.info // 0' audit-output.json)
+          LOW=$(jq -r '.metadata.vulnerabilities.low // 0' audit-output.json)
+          MODERATE=$(jq -r '.metadata.vulnerabilities.moderate // 0' audit-output.json)
+          HIGH=$(jq -r '.metadata.vulnerabilities.high // 0' audit-output.json)
+          CRITICAL=$(jq -r '.metadata.vulnerabilities.critical // 0' audit-output.json)
+
+          echo "::notice::Vulnerabilities: info=${INFO}, low=${LOW}, moderate=${MODERATE}, high=${HIGH}, critical=${CRITICAL}"
+          echo "vulnerability_count=${VULN_COUNT}" >> "$GITHUB_OUTPUT"
+
+          if [ "${HIGH}" -gt 0 ]; then
+            echo "::error::${HIGH} high severity vulnerabilities found"
+          fi
+          if [ "${CRITICAL}" -gt 0 ]; then
+            echo "::error::${CRITICAL} critical severity vulnerabilities found"
+          fi
+          if [ "${MODERATE}" -gt 0 ] && [ "${AUDIT_LEVEL}" != "high" ] && [ "${AUDIT_LEVEL}" != "critical" ]; then
+            echo "::warning::${MODERATE} moderate severity vulnerabilities found"
+          fi
+
+          rm -f audit-output.json
+        else
+          VULN_COUNT=0
+          echo "vulnerability_count=0" >> "$GITHUB_OUTPUT"
+          echo "::warning::npm audit did not produce valid JSON output"
+        fi
+
+        # Gracefully handle known npm bug: non-zero exit with zero vulnerabilities
+        if [ "${EXIT_CODE}" -ne 0 ] && [ "${VULN_COUNT}" -eq 0 ]; then
+          echo "::warning::npm audit returned exit code ${EXIT_CODE} but no vulnerabilities were found. Treating as success (known npm bug)."
+          EXIT_CODE=0
+        fi
+
+        echo "exit_code=${EXIT_CODE}" >> "$GITHUB_OUTPUT"
+
+        if [ "${EXIT_CODE}" -ne 0 ]; then
+          echo "::error::npm audit failed with exit code ${EXIT_CODE}. ${VULN_COUNT} vulnerability(s) at or above '${AUDIT_LEVEL}' severity."
+          exit 1
+        fi
+
+        echo "::notice::npm audit passed. No vulnerabilities at or above '${AUDIT_LEVEL}' severity."

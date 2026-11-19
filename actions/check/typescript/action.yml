@@ -1,0 +1,123 @@
+name: 'TypeScript Check'
+description: |
+  Run TypeScript type checker (tsc --noEmit) on a project with configurable
+  working directory and tsconfig path. Produces GitHub annotations for errors.
+
+branding:
+  icon: 'check-square'
+  color: 'blue'
+
+inputs:
+  working_directory:
+    description: 'Working directory to run the check in'
+    required: false
+    default: '.'
+  tsconfig_path:
+    description: 'Path to tsconfig.json relative to working_directory'
+    required: false
+    default: 'tsconfig.json'
+  node_version:
+    description: 'Node.js version to use'
+    required: false
+    default: '20'
+  package_manager:
+    description: 'Package manager used for cache key + install (npm or pnpm)'
+    required: false
+    default: 'npm'
+
+outputs:
+  exit_code:
+    description: 'Exit code from tsc (0 = success)'
+    value: ${{ steps.tsc.outputs.exit_code }}
+  errors:
+    description: 'Number of TypeScript errors found'
+    value: ${{ steps.tsc.outputs.errors }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Setup pnpm (when pnpm)
+      if: inputs.package_manager == 'pnpm'
+      uses: pnpm/action-setup@v6
+      with:
+        version: 9
+
+    - name: Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: ${{ inputs.node_version }}
+        cache: ${{ inputs.package_manager }}
+
+    - name: Install dependencies
+      shell: bash
+      working-directory: ${{ inputs.working_directory }}
+      run: |
+        if [[ -f "package.json" ]]; then
+          case "${{ inputs.package_manager }}" in
+            pnpm)
+              corepack enable
+              pnpm install --frozen-lockfile
+              ;;
+            *)
+              npm ci
+              ;;
+          esac
+        else
+          echo "::warning::No package.json found in ${{ inputs.working_directory }}; skipping install"
+        fi
+
+    - name: TypeScript type check
+      id: tsc
+      shell: bash
+      working-directory: ${{ inputs.working_directory }}
+      run: |
+        set -uo pipefail
+
+        TSCONFIG="${{ inputs.tsconfig_path }}"
+
+        if [[ ! -f "$TSCONFIG" ]]; then
+          echo "::error::tsconfig not found at ${{ inputs.working_directory }}/$TSCONFIG"
+          echo "exit_code=1" >> "$GITHUB_OUTPUT"
+          echo "errors=0" >> "$GITHUB_OUTPUT"
+          exit 1
+        fi
+
+        TMPFILE=$(mktemp)
+        trap 'rm -f "$TMPFILE"' EXIT
+
+        EXIT_CODE=0
+        npx tsc --noEmit -p "$TSCONFIG" > "$TMPFILE" 2>&1 || EXIT_CODE=$?
+
+        ERROR_COUNT=$(grep -cE "error TS[0-9]+:" "$TMPFILE" || true)
+        if [[ -z "$ERROR_COUNT" ]]; then
+          ERROR_COUNT=0
+        fi
+
+        echo "exit_code=$EXIT_CODE" >> "$GITHUB_OUTPUT"
+        echo "errors=$ERROR_COUNT" >> "$GITHUB_OUTPUT"
+
+        if [[ "$EXIT_CODE" -ne 0 ]]; then
+          WD="${{ inputs.working_directory }}"
+          WD="${WD%/}"
+
+          while IFS= read -r line; do
+            if [[ "$line" =~ ^(.+)\(([0-9]+),([0-9]+)\):\ (error\ TS[0-9]+):\ (.+)$ ]]; then
+              FILE="${BASH_REMATCH[1]}"
+              LINE_NUM="${BASH_REMATCH[2]}"
+              COL_NUM="${BASH_REMATCH[3]}"
+              CODE="${BASH_REMATCH[4]}"
+              MSG="${BASH_REMATCH[5]}"
+
+              if [[ "$WD" != "." ]]; then
+                FILE="$WD/$FILE"
+              fi
+
+              echo "::error file=$FILE,line=$LINE_NUM,col=$COL_NUM::$CODE: $MSG"
+            fi
+          done < "$TMPFILE"
+
+          echo "::error::TypeScript check failed with $ERROR_COUNT error(s) (exit code $EXIT_CODE)"
+          exit 1
+        fi
+
+        echo "::notice::TypeScript check passed ($ERROR_COUNT errors)"

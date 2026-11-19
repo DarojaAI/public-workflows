@@ -1,0 +1,135 @@
+name: Reusable Terraform Stub Plan
+
+on:
+  workflow_call:
+    inputs:
+      runner:
+        description: 'Runner label for the jobs in this workflow. Empty (the default) uses the calling repo or org variable RUNNER_POOL if set, else ubuntu-latest.'
+        required: false
+        type: string
+        default: ''
+      terraform-version:
+        description: 'Terraform version to use'
+        required: false
+        type: string
+        default: '1.15.1'
+      working-directory:
+        description: 'Directory containing Terraform code'
+        required: false
+        type: string
+        default: 'terraform'
+      backend-file:
+        description: 'Path to backend.tf relative to repo root (removed for stub run)'
+        required: false
+        type: string
+        default: 'terraform/backend.tf'
+      module-cache-path:
+        description: 'Path to .terraform/modules for caching'
+        required: false
+        type: string
+        default: 'terraform/.terraform/modules'
+      cache-key-file:
+        description: 'File to hash for cache key'
+        required: false
+        type: string
+        default: 'terraform/main.tf'
+      stub-vars-json:
+        description: 'JSON object of TF_VAR_* values for stub plan (e.g. {"project_id":"stub"})'
+        required: false
+        type: string
+        default: '{}'
+      plan-timeout-minutes:
+        description: 'Timeout for terraform plan step'
+        required: false
+        type: number
+        default: 3
+    secrets:
+      github-token:
+        description: 'GitHub token for private module clones'
+        required: false
+
+permissions:
+  contents: read
+
+jobs:
+  stub-plan:
+    name: Terraform Stub Plan (templatefile validation)
+    runs-on: ${{ inputs.runner || vars.RUNNER_POOL || 'ubuntu-latest' }}
+    timeout-minutes: 15
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Configure git for module clones
+        run: |
+          TOKEN="${{ secrets.github-token }}"
+          if [ -n "$TOKEN" ]; then
+            git config --global url."https://x-access-token:${TOKEN}@github.com/".insteadOf "https://github.com/"
+          fi
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v4
+        with:
+          terraform_version: ${{ inputs.terraform-version }}
+
+      - name: Cache Terraform modules
+        uses: actions/cache@v5
+        with:
+          path: ${{ inputs.module-cache-path }}
+          key: terraform-modules-${{ hashFiles(inputs.cache-key-file) }}
+
+      - name: Remove backend.tf for stub run
+        run: rm -f ${{ inputs.backend-file }}
+
+      - name: Terraform Init (no backend)
+        working-directory: ${{ inputs.working-directory }}
+        run: terraform init -backend=false -input=false
+
+      - name: Export stub variables
+        run: |
+          echo '${{ inputs.stub-vars-json }}' | jq -r 'to_entries | .[] | "TF_VAR_\(.key)=\(.value)"' >> "$GITHUB_ENV"
+          echo "=== Stub variables exported ==="
+          grep "^TF_VAR_" "$GITHUB_ENV" || echo "(none)"
+
+      - name: Terraform Plan (stub, no refresh)
+        working-directory: ${{ inputs.working-directory }}
+        timeout-minutes: ${{ inputs.plan-timeout-minutes }}
+        # FAIL-CLOSED: no continue-on-error. A non-zero terraform plan exit
+        # (missing variable, bad config, provider error, timeout) fails this
+        # step and therefore the job. The templatefile check below still runs
+        # (if: always()) so its message is reported alongside the failure.
+        env:
+          GOOGLE_OAUTH_ACCESS_TOKEN: "stub-token-never-used"
+        # bash with pipefail, so `| tee` can never mask terraform's exit code
+        # (PIPESTATUS below is kept as a second line of defence).
+        shell: bash -o pipefail {0}
+        run: |
+          terraform plan \
+            -refresh=false \
+            -input=false \
+            -no-color \
+            2>&1 | tee /tmp/stub-plan-output.txt
+          exit "${PIPESTATUS[0]}"
+
+      - name: Check for templatefile errors
+        if: always()
+        run: |
+          if grep -q "Invalid template variable\|Error in function call\|Call to function.*templatefile" /tmp/stub-plan-output.txt 2>/dev/null; then
+            echo ""
+            echo "❌ templatefile() error detected — likely an unescaped \${bash_var} in a startup script."
+            echo "Fix: replace \${var} with \$\${var} for bash-local variables that are not Terraform template vars."
+            grep -A5 "Invalid template variable\|Error in function call\|Call to function.*templatefile" /tmp/stub-plan-output.txt
+            exit 1
+          fi
+          echo "✅ No templatefile errors detected"
+
+      - name: Upload plan output on failure
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: stub-plan-output
+          path: /tmp/stub-plan-output.txt
+          retention-days: 7

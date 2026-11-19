@@ -1,0 +1,420 @@
+name: _Reusable Check Branch Protection
+
+on:
+  workflow_call:
+    inputs:
+      runner:
+        description: 'Runner label for the jobs in this workflow. Empty (the default) uses the calling repo or org variable RUNNER_POOL if set, else ubuntu-latest.'
+        required: false
+        type: string
+        default: ''
+      repo:
+        description: "owner/repo (defaults to current repo)"
+        required: false
+        type: string
+        default: ""
+      branch:
+        description: "Branch to inspect (defaults to repo default branch)"
+        required: false
+        type: string
+        default: ""
+      baseline_json:
+        description: "JSON string of the baseline protection to compare against (required; there is no built-in baseline). Only the keys listed are checked; unknown keys, an empty object and non-object JSON fail the audit. Note: false values for allow_* and block_creations match GitHub's defaults, so a baseline listing only those passes on any classic-protected branch."
+        required: true
+        type: string
+      app-client-id:
+        description: >
+          Optional. Client ID of the GitHub App that mints the token for the
+          audit reads. It is not a secret. Set together with the app-private-key
+          secret. Leave both empty to use the github-token secret. With the App
+          path the audit fails closed: an unreadable protection or ruleset read
+          fails the run instead of being reported as unknown. Dependabot and fork
+          PRs cannot read secrets, so with this set they fail closed too.
+          The App needs Administration: read on the audited repo.
+        required: false
+        type: string
+        default: ''
+    outputs:
+      protected:
+        description: "true if branch protection is enabled and matches the baseline"
+        value: ${{ jobs.check.outputs.protected }}
+      missing:
+        description: "JSON array of baseline keys that are missing or non-compliant"
+        value: ${{ jobs.check.outputs.missing }}
+      diff:
+        description: "JSON diff between current and baseline"
+        value: ${{ jobs.check.outputs.diff }}
+      audit_json:
+        description: "Full audit result as JSON"
+        value: ${{ jobs.check.outputs.audit_json }}
+    secrets:
+      app-private-key:
+        description: >
+          Optional. Private key of the GitHub App named by app-client-id.
+          Set together with app-client-id. Leave both empty to use github-token.
+        required: false
+      github-token:
+        description: "GitHub token. Used when app-client-id and app-private-key are not set. Required in that case."
+        required: false
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  check:
+    name: Check branch protection
+    runs-on: ${{ inputs.runner || vars.RUNNER_POOL || 'ubuntu-latest' }}
+    outputs:
+      protected: ${{ steps.audit.outputs.protected }}
+      missing: ${{ steps.audit.outputs.missing }}
+      diff: ${{ steps.audit.outputs.diff }}
+      audit_json: ${{ steps.audit.outputs.audit_json }}
+    steps:
+      - name: Validate App token inputs
+        id: app-inputs
+        env:
+          APP_CLIENT_ID: ${{ inputs.app-client-id }}
+          APP_PRIVATE_KEY: ${{ secrets.app-private-key }}
+          GITHUB_TOKEN_SECRET: ${{ secrets.github-token }}
+          INPUT_REPO: ${{ inputs.repo }}
+          INPUT_BRANCH: ${{ inputs.branch }}
+          DEFAULT_REPO: ${{ github.repository }}
+          REPO_OWNER: ${{ github.repository_owner }}
+        run: |
+          set -euo pipefail
+          # Presence checks only. The key and token are never printed.
+          if [ -n "$APP_CLIENT_ID" ] && [ -z "$APP_PRIVATE_KEY" ]; then
+            echo "::error::app-client-id is set but the app-private-key secret is empty. Set both, or neither to use github-token."
+            exit 1
+          fi
+          if [ -z "$APP_CLIENT_ID" ] && [ -n "$APP_PRIVATE_KEY" ]; then
+            echo "::error::app-private-key is set but app-client-id is empty. Set both, or neither to use github-token."
+            exit 1
+          fi
+          REPO="${INPUT_REPO:-$DEFAULT_REPO}"
+          # Validate on both paths. Values land in GITHUB_OUTPUT below, so a
+          # newline in them could inject extra output lines (e.g. use-app=true).
+          if ! [[ "$REPO" =~ ^[A-Za-z0-9-]+/[A-Za-z0-9._-]+$ ]]; then
+            echo "::error::repo input must look like owner/name (letters, digits, '.', '_', '-', no whitespace)."
+            exit 1
+          fi
+          NAME="${REPO#*/}"
+          if [ "$NAME" = "." ] || [ "$NAME" = ".." ]; then
+            echo "::error::repo input has an invalid repository name."
+            exit 1
+          fi
+          if [ -n "$INPUT_BRANCH" ]; then
+            if ! [[ "$INPUT_BRANCH" =~ ^[A-Za-z0-9._/-]+$ ]] || [[ "$INPUT_BRANCH" == *..* ]]; then
+              echo "::error::branch input must be a plain git ref name (letters, digits, '.', '_', '/', '-', no '..', no whitespace)."
+              exit 1
+            fi
+          fi
+          if [ -n "$APP_CLIENT_ID" ]; then
+            # The App token is scoped to the audited repo only, so the target must
+            # live in the caller's owner.
+            OWNER_LC="${REPO%%/*}"; OWNER_LC="${OWNER_LC,,}"
+            CALLER_LC="${REPO_OWNER,,}"
+            if [ "$OWNER_LC" != "$CALLER_LC" ]; then
+              echo "::error::repo input owner must equal the repository owner ($REPO_OWNER) when an App token is used."
+              exit 1
+            fi
+            echo "use-app=true" >> "$GITHUB_OUTPUT"
+          else
+            if [ -z "$GITHUB_TOKEN_SECRET" ]; then
+              echo "::error::No credentials: set the github-token secret, or app-client-id with the app-private-key secret."
+              exit 1
+            fi
+            echo "use-app=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::No App credentials set; using the github-token secret."
+          fi
+          echo "repo=${REPO}" >> "$GITHUB_OUTPUT"
+          echo "repo-name=${REPO#*/}" >> "$GITHUB_OUTPUT"
+
+      - name: Mint GitHub App token
+        id: app-token
+        if: steps.app-inputs.outputs.use-app == 'true'
+        # Same pin as reusable-security-gate.yml.
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        with:
+          client-id: ${{ inputs.app-client-id }}
+          private-key: ${{ secrets.app-private-key }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ steps.app-inputs.outputs.repo-name }}
+          # Least privilege: protection and ruleset reads need administration read.
+          # GET repos/{repo} needs only metadata, which is implicit.
+          permission-administration: read
+
+      - name: Resolve target repo and branch
+        id: target
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token || secrets.github-token }}
+          REPO: ${{ steps.app-inputs.outputs.repo }}
+          INPUT_BRANCH: ${{ inputs.branch }}
+        run: |
+          if [ -n "$INPUT_BRANCH" ]; then
+            BRANCH="$INPUT_BRANCH"
+          else
+            BRANCH=$(gh api "repos/${REPO}" --jq '.default_branch')
+          fi
+          echo "repo=${REPO}" >> "$GITHUB_OUTPUT"
+          echo "branch=${BRANCH}" >> "$GITHUB_OUTPUT"
+
+      - name: Read current protection
+        id: read
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token || secrets.github-token }}
+          REPO: ${{ steps.target.outputs.repo }}
+          BRANCH: ${{ steps.target.outputs.branch }}
+          USE_APP: ${{ steps.app-inputs.outputs.use-app }}
+        run: |
+          if [ "$USE_APP" = "true" ]; then
+            # App path fails closed. A 401/403, or a 404 that is not the plain
+            # "Branch not protected" answer, means the App cannot read protection
+            # on this repo. That is an error, never a pass and never "unknown".
+            # gh api -i puts the real HTTP status on the first line.
+            set +e
+            RESP=$(gh api -i "repos/${REPO}/branches/${BRANCH}/protection" 2>/dev/null)
+            set -e
+            STATUS=$(printf '%s\n' "$RESP" | sed -n '1s#^HTTP/[0-9.]* \([0-9]*\).*#\1#p')
+            BODY=$(printf '%s\n' "$RESP" | awk 'b{print} /^\r?$/{b=1}')
+            MSG=$(printf '%s' "$BODY" | jq -r '.message // empty' 2>/dev/null || true)
+            if [ "$STATUS" = "200" ] || { [ "$STATUS" = "404" ] && [ "$MSG" = "Branch not protected" ]; }; then
+              echo "status=${STATUS}" >> "$GITHUB_OUTPUT"
+              echo "current=${BODY}" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            echo "::error::Cannot read branch protection on ${REPO}/${BRANCH} with the App token (HTTP ${STATUS:-unknown}: ${MSG:-no message}). Check that the App is installed on the repo with Administration: read."
+            exit 1
+          fi
+          # github-token path keeps its semantics: never fails here. The audit step
+          # turns 401/403 into "cannot read" and 404 into "not protected". gh api
+          # has no -o/-w flags, so read the real status the same way the App path
+          # does: gh api -i puts it on the first line.
+          set +e
+          RESP=$(gh api -i "repos/${REPO}/branches/${BRANCH}/protection" 2>/dev/null)
+          set -e
+          STATUS=$(printf '%s\n' "$RESP" | sed -n '1s#^HTTP/[0-9.]* \([0-9]*\).*#\1#p')
+          BODY=$(printf '%s\n' "$RESP" | awk 'b{print} /^\r?$/{b=1}')
+          echo "status=${STATUS:-000}" >> "$GITHUB_OUTPUT"
+          echo "current=${BODY}" >> "$GITHUB_OUTPUT"
+
+      - name: Audit against baseline
+        id: audit
+        env:
+          REPO: ${{ steps.target.outputs.repo }}
+          BRANCH: ${{ steps.target.outputs.branch }}
+          STATUS: ${{ steps.read.outputs.status }}
+          CURRENT: ${{ steps.read.outputs.current }}
+          BASELINE_INPUT: ${{ inputs.baseline_json }}
+        run: |
+          # Never reuse output from an earlier run on a reused runner.
+          rm -f /tmp/audit_github_output /tmp/audit_result.json
+          python3 <<'PY'
+          import json, os, sys
+
+          repo = os.environ["REPO"]
+          branch = os.environ["BRANCH"]
+          status = int(os.environ["STATUS"])
+          current_raw = os.environ["CURRENT"]
+          baseline_input = os.environ.get("BASELINE_INPUT", "").strip()
+
+          BOOL_KEYS = (
+              "enforce_admins",
+              "required_linear_history",
+              "allow_force_pushes",
+              "allow_deletions",
+              "block_creations",
+              "required_conversation_resolution",
+          )
+          REVIEW_KEYS = (
+              "required_approving_review_count",
+              "dismiss_stale_reviews",
+              "require_code_owner_reviews",
+              "require_last_push_approval",
+          )
+
+          def fail(msg):
+              print(f"::error::{msg}")
+              sys.exit(1)
+
+          if not baseline_input:
+              fail("baseline_json is required: pass the protection this branch should have (there is no built-in baseline).")
+          try:
+              baseline = json.loads(baseline_input)
+          except json.JSONDecodeError as e:
+              fail(f"baseline_json is not valid JSON: {e}")
+
+          # Only keys present in the baseline are audited. Validate up front so a
+          # typo or an empty baseline can never silently pass.
+          if not isinstance(baseline, dict) or not baseline:
+              fail("baseline_json must be a non-empty JSON object (nothing to audit).")
+          known = set(BOOL_KEYS) | {"required_pull_request_reviews"}
+          unknown = sorted(set(baseline) - known)
+          if unknown:
+              fail(f"baseline_json has unknown keys: {', '.join(unknown)}. Allowed: {', '.join(sorted(known))}.")
+          for k in BOOL_KEYS:
+              if k in baseline and not isinstance(baseline[k], bool):
+                  fail(f"baseline_json key {k} must be true or false.")
+          if "required_pull_request_reviews" in baseline:
+              rb = baseline["required_pull_request_reviews"]
+              if not isinstance(rb, dict):
+                  fail("baseline_json key required_pull_request_reviews must be an object.")
+              bad_sub = sorted(set(rb) - set(REVIEW_KEYS))
+              if bad_sub:
+                  fail(f"baseline_json required_pull_request_reviews has unknown keys: {', '.join(bad_sub)}.")
+              cnt = rb.get("required_approving_review_count", 0)
+              if isinstance(cnt, bool) or not isinstance(cnt, int) or cnt < 0:
+                  fail("baseline_json required_approving_review_count must be an integer >= 0.")
+              for k in REVIEW_KEYS[1:]:
+                  if k in rb and not isinstance(rb[k], bool):
+                      fail(f"baseline_json required_pull_request_reviews.{k} must be true or false.")
+
+          # FIX 2026-09-10: a 401/403 from the protection read is a TOKEN-
+          # PERMISSION failure, not "unprotected". GITHUB_TOKEN has no admin
+          # on branches, so gh api returns 403 with a `{"message": ...}` body.
+          # Previously that error body parsed cleanly as JSON, every `get()`
+          # returned default, and the job falsely reported the branch UNPROTECTED
+          # (protected=False + "Apply to enable") on repos that are actually
+          # fully protected — flaging healthy PRs red and suggesting a baseline
+          # payload that would not be an honest diff. Treat 401/403 explicitly as
+          # "cannot read", never as "unprotected", and surface the read error.
+          # Any status other than 200/404 (401/403, 5xx, 000, unparsed) is also
+          # "cannot read", never "unprotected".
+          if status not in (200, 404):
+              protected = False
+              missing = []
+              diff = {"current": None, "baseline": None}
+              audit = {
+                  "repo": repo,
+                  "branch": branch,
+                  "protected": False,
+                  "readable": False,
+                  "http_status": status,
+                  "consistent_unprotected": False,
+                  "missing_keys": missing,
+                  "diff": diff,
+                  "read_error": current_raw[:400],
+                  "summary": (
+                      f"Cannot read branch protection on {repo}/{branch} "
+                      f"(HTTP {status}): " + (
+                          "token lacks admin/branch-protection read. "
+                          "Pass a token with admin:org / repo admin (or use "
+                          "GITHUB_TOKEN with the repo ruleset) to audit; "
+                          if status in (401, 403)
+                          else "unexpected response from the protection read. "
+                      ) + "this is NOT an unprotected-branch signal."
+                  ),
+              }
+          elif status == 404 or not current_raw.strip().startswith("{"):
+              protected = False
+              missing = list(baseline.keys())
+              diff = {"current": None, "baseline": baseline}
+              audit = {
+                  "repo": repo,
+                  "branch": branch,
+                  "protected": False,
+                  "readable": True,
+                  "http_status": status,
+                  "consistent_unverified": False,
+                  "missing_keys": missing,
+                  "diff": diff,
+                  "suggested_payload": baseline,
+                  "summary": f"Branch {branch} on {repo} has NO branch protection. Apply baseline to enable.",
+              }
+          else:
+              try:
+                  current = json.loads(current_raw)
+              except json.JSONDecodeError:
+                  current = {}
+
+              def get(d, *path, default=None):
+                  for k in path:
+                      if isinstance(d, dict) and k in d:
+                          d = d[k]
+                      else:
+                          return default
+                  return d
+
+              checks = {}
+              for k in BOOL_KEYS:
+                  if k in baseline:
+                      checks[k] = get(current, k, "enabled") is baseline[k]
+              if "required_pull_request_reviews" in baseline:
+                  rb = baseline["required_pull_request_reviews"]
+                  rv = current.get("required_pull_request_reviews") if isinstance(current, dict) else None
+                  rv = rv if isinstance(rv, dict) else None
+                  ok = rv is not None
+                  if ok:
+                      have = rv.get("required_approving_review_count", 0)
+                      ok = isinstance(have, int) and have >= rb.get("required_approving_review_count", 0)
+                  if ok:
+                      # True in the baseline means required; False means not required.
+                      for k in REVIEW_KEYS[1:]:
+                          if rb.get(k) is True and rv.get(k) is not True:
+                              ok = False
+                  checks["required_pull_request_reviews"] = ok
+
+              missing = [k for k, ok in checks.items() if not ok]
+              protected = len(missing) == 0
+
+              audit = {
+                  "repo": repo,
+                  "branch": branch,
+                  "protected": protected,
+                  "readable": True,
+                  "http_status": status,
+                  "checks": checks,
+                  "missing_keys": missing,
+                  "diff": {
+                      "current_keys_present": [k for k, ok in checks.items() if ok],
+                      "missing_or_noncompliant": missing,
+                  },
+                  "suggested_payload": baseline,
+                  "summary": (
+                      f"Branch {branch} on {repo} is fully protected."
+                      if protected
+                      else f"Branch {branch} on {repo} is missing: {', '.join(missing)}"
+                  ),
+              }
+
+          with open("/tmp/audit_result.json", "w") as f:
+              json.dump(audit, f, indent=2, sort_keys=True)
+
+          with open("/tmp/audit_github_output", "w") as f:
+              f.write(f"protected={'true' if audit['protected'] else 'false'}\n")
+              f.write(f"readable={'true' if audit['readable'] else 'false'}\n")
+              f.write(f"http_status={audit['http_status']}\n")
+              f.write(f"missing={json.dumps(audit['missing_keys'])}\n")
+              f.write(f"diff={json.dumps(audit['diff'])}\n")
+              f.write(f"audit_json={json.dumps(audit)}\n")
+
+          print(json.dumps(audit, indent=2, sort_keys=True))
+          PY
+
+          # Pull the values written by python and feed them to $GITHUB_OUTPUT
+          while IFS='=' read -r key value; do
+            echo "${key}=${value}" >> "$GITHUB_OUTPUT"
+          done < /tmp/audit_github_output
+
+      - name: Comment summary on triggering PR
+        if: github.event_name == 'issue_comment' || github.event.pull_request.number != ''
+        uses: marocchino/sticky-pull-request-comment@v2
+        with:
+          header: branch-protection-audit
+          message: |
+            ### Branch protection audit — `${{ steps.target.outputs.repo }}@${{ steps.target.outputs.branch }}`
+
+            **Status:** ${{ steps.audit.outputs.protected == 'true' && '✅ Protected' || (steps.audit.outputs.readable != 'true' && '⚠️ Cannot read (token permission)' || '❌ Not protected (or non-compliant)') }}
+
+            **Note:** ${{ steps.audit.outputs.readable == 'true' && 'None' || format('The protection read returned HTTP {0} (token-permission error). This is NOT an unprotected-branch signal; pass a token with branch-protection read to audit.', steps.audit.outputs.http_status) }}
+
+            **Missing keys:**
+            ```
+            ${{ steps.audit.outputs.missing }}
+            ```
+
+            **Suggested payload (run via `/apply-protection` slash command):**
+            ```json
+            ${{ steps.audit.outputs.audit_json }}
+            ```

@@ -1,0 +1,97 @@
+name: 'Vitest Unit Tests'
+description: |
+  Run unit tests with Vitest. Supports optional coverage reporting
+  and configurable working directory and config file.
+
+branding:
+  icon: 'check-square'
+  color: 'blue'
+
+inputs:
+  working_directory:
+    description: 'Directory containing the Node.js project'
+    required: false
+    default: '.'
+  config_file:
+    description: 'Vitest configuration file path'
+    required: false
+    default: 'vitest.config.ts'
+  coverage:
+    description: 'Enable coverage reporting'
+    required: false
+    default: 'false'
+  package_manager:
+    description: 'Package manager used for cache key + install (npm or pnpm)'
+    required: false
+    default: 'npm'
+
+outputs:
+  exit_code:
+    description: 'Exit code from the vitest run'
+    value: ${{ steps.vitest.outputs.exit_code }}
+  passed:
+    description: 'True if all tests passed'
+    value: ${{ steps.vitest.outputs.passed }}
+  failed:
+    description: 'True if any tests failed'
+    value: ${{ steps.vitest.outputs.failed }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Setup pnpm (when pnpm)
+      if: inputs.package_manager == 'pnpm'
+      uses: pnpm/action-setup@v6
+      with:
+        version: 9
+
+    - name: Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: '20'
+        cache: ${{ inputs.package_manager }}
+        cache-dependency-path: ${{ inputs.working_directory }}/${{ inputs.package_manager == 'pnpm' && 'pnpm-lock.yaml' || 'package-lock.json' }}
+
+    - name: Install dependencies
+      shell: bash
+      working-directory: ${{ inputs.working_directory }}
+      run: |
+        case "${{ inputs.package_manager }}" in
+          pnpm)
+            corepack enable
+            pnpm install --frozen-lockfile
+            ;;
+          *)
+            npm ci
+            ;;
+        esac
+
+    - name: Run Vitest
+      id: vitest
+      shell: bash
+      working-directory: ${{ inputs.working_directory }}
+      run: |
+        COVERAGE_FLAG=""
+        if [ "${{ inputs.coverage }}" == "true" ]; then
+          COVERAGE_FLAG="--coverage"
+        fi
+
+        echo "::notice::Running vitest --config ${{ inputs.config_file }} ${COVERAGE_FLAG}"
+
+        set +e
+        npx vitest run --config ${{ inputs.config_file }} ${COVERAGE_FLAG}
+        EXIT_CODE=$?
+        set -e
+
+        echo "exit_code=${EXIT_CODE}" >> "$GITHUB_OUTPUT"
+
+        if [ "${EXIT_CODE}" -eq 0 ]; then
+          echo "passed=true" >> "$GITHUB_OUTPUT"
+          echo "failed=false" >> "$GITHUB_OUTPUT"
+          echo "::notice::All tests passed"
+        else
+          echo "passed=false" >> "$GITHUB_OUTPUT"
+          echo "failed=true" >> "$GITHUB_OUTPUT"
+          echo "::error::Tests failed with exit code ${EXIT_CODE}"
+          exit 1
+        fi
