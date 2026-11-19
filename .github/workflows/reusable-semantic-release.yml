@@ -102,7 +102,7 @@ on:
           Git checkout depth. semantic-release needs the full history
           to walk commits since the last published release tag and
           resolve the next version. `fetch-depth: 1` (shallow clone)
-          is the actions/checkout default, but it is the known-broken
+          is what actions/checkout does unless told otherwise, but it is the known-broken
           setting for semantic-release: with a single
           commit, the analyzer cannot determine the previous
           version and either fails or publishes a wrong version.
@@ -249,13 +249,13 @@ jobs:
       # Failure mode being prevented:
       #
       #   semantic-release analyzes commits since the last *published*
-      #   release, computes the next version (e.g. v1.21.7), and then
-      #   runs `git tag v1.21.7 <head-sha>`. If a tag with that version
+      #   release, computes the next version (e.g. v1.2.3), and then
+      #   runs `git tag v1.2.3 <head-sha>`. If a tag with that version
       #   already exists on the remote — because a previous run was
       #   interrupted after the tag step but before the GitHub release
       #   was published, or because someone manually tagged the commit
       #   to "claim" the version — the tag command fails with exit
-      #   code 128 ("fatal: tag 'v1.21.7' already exists") and the
+      #   code 128 ("fatal: tag 'v1.2.3' already exists") and the
       #   entire release is blocked.
       #
       # We detect this with a `--dry-run`, which runs the analyzer
@@ -270,8 +270,8 @@ jobs:
       #     commands the operator can run by hand.
       #
       # Default is fail-fast: a stuck release is loud, not silent.
-      # Example: a manually created v1.21.7 tag with no GitHub release
-      # blocks the next release, which would also have been v1.21.7.
+      # Example: a manually created v1.2.3 tag with no GitHub release
+      # blocks the next release, which would also have been v1.2.3.
 
       # Patch semantic-release's hardcoded FIRST_RELEASE constant.
       # See the `initial-version` input description for why this
@@ -321,7 +321,7 @@ jobs:
           echo "::endgroup::"
 
           # 2. Extract the next version. The line looks like:
-          #   [10:40:55 PM] [semantic-release] › ℹ  The next release version is 1.21.7
+          #   [10:40:55 PM] [semantic-release] › ℹ  The next release version is 1.2.3
           NEXT_VERSION=$(printf '%s\n' "$DRY_OUTPUT" \
             | grep -oP 'next release version is \K\S+' \
             | head -1 || true)

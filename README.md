@@ -143,6 +143,8 @@ jobs:
 - **Caller's `.releaserc`:** set `preset: conventionalcommits` on
   `@semantic-release/commit-analyzer` and `@semantic-release/release-notes-generator`,
   or `type!:` headers will not cut a major.
+- **Inputs are used as-is in shell steps.** Pass constants or values you control, never
+  data from an untrusted event (for example a PR title under `pull_request_target`).
 
 ```yaml
 jobs:

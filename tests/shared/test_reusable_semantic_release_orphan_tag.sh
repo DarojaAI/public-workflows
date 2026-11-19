@@ -55,6 +55,18 @@ assert "reusable step has ::error:: annotations" "grep -A100 'name: Detect and r
 assert "reusable step deletes the remote tag when self-healing" "grep -A100 'name: Detect and resolve orphan tag collisions' $REUSABLE_RELEASE_YML | grep -q 'git push origin \":refs/tags/'"
 assert "reusable step deletes the local tag when self-healing" "grep -A100 'name: Detect and resolve orphan tag collisions' $REUSABLE_RELEASE_YML | grep -q 'git tag -d'"
 
+echo ""
+echo "=== Orphan-tag step runs BEFORE Run semantic-release ==="
+DETECT_LINE=$(grep -n 'name: Detect and resolve orphan tag collisions' "$REUSABLE_RELEASE_YML" | head -1 | cut -d: -f1)
+RUN_LINE=$(grep -n 'name: Run semantic-release' "$REUSABLE_RELEASE_YML" | head -1 | cut -d: -f1)
+if [[ -n "$DETECT_LINE" && -n "$RUN_LINE" && "$DETECT_LINE" -lt "$RUN_LINE" ]]; then
+  echo "  ✅ orphan-tag step runs before Run semantic-release (line $DETECT_LINE < $RUN_LINE)"
+  PASS=$((PASS + 1))
+else
+  echo "  ❌ orphan-tag step does NOT run before Run semantic-release (detect=$DETECT_LINE, run=$RUN_LINE)"
+  FAIL=$((FAIL + 1))
+fi
+
 # =============================================================================
 # Functional smoke test: extract the step's shell script and verify it
 # parses as valid bash and contains the expected control flow.
