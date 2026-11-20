@@ -39,7 +39,7 @@ permissions:
 jobs:
   agent-guardrails:
     name: agent-guardrails
-    runs-on: ubuntu-latest
+    runs-on: ${{ vars.RUNNER_POOL || 'ubuntu-latest' }}
     timeout-minutes: 5
     steps:
       - name: Checkout (full history for the base...head diff)
